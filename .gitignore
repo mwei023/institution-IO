@@ -1,0 +1,239 @@
+# ============================================================
+# INSTITUTION OS — .gitignore
+# ============================================================
+
+# ------------------------------------------------------------
+# SECRETS & CREDENTIALS (CRITICAL — never commit these)
+# ------------------------------------------------------------
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+.env.staging
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+credentials/
+service-account*.json
+firebase-adminsdk*.json
+google-credentials*.json
+mpesa-credentials*
+jwt-secret*
+keystore*
+
+# ------------------------------------------------------------
+# NODE / NEXT.JS (Frontend)
+# ------------------------------------------------------------
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+
+# ------------------------------------------------------------
+# PYTHON / DJANGO OR FASTAPI (Backend)
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+.env/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.so
+*.dylib
+celerybeat-schedule
+celerybeat.pid
+
+# ------------------------------------------------------------
+# DATABASE
+# ------------------------------------------------------------
+*.sqlite3
+*.sqlite
+*.db
+*.sql.gz
+db_dumps/
+backups/
+*.dump
+pg_data/
+mysql_data/
+redis_data/
+
+# ------------------------------------------------------------
+# DOCKER
+# ------------------------------------------------------------
+docker-compose.override.yml
+docker-compose.prod.yml
+.docker/
+volumes/
+
+# ------------------------------------------------------------
+# UPLOADS & MEDIA (Digital Locker, student docs, staff docs)
+# Never store real student/staff files in git
+# ------------------------------------------------------------
+media/
+uploads/
+private/
+documents/
+student-files/
+staff-files/
+institution-files/
+*.pdf
+*.docx
+*.xlsx
+*.jpg
+*.jpeg
+*.png
+*.mp4
+!src/assets/**
+!public/assets/**
+!public/icons/**
+!public/logo*
+
+# ------------------------------------------------------------
+# LOGS
+# ------------------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+django.log
+celery*.log
+gunicorn*.log
+nginx*.log
+audit.log*
+
+# ------------------------------------------------------------
+# TESTING & COVERAGE
+# ------------------------------------------------------------
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.jest-cache/
+jest_html_reporters-attach/
+test-results/
+playwright-report/
+playwright/.cache/
+*.lcov
+
+# ------------------------------------------------------------
+# M-PESA & PAYMENT INTEGRATION
+# (callbacks, receipts, transaction logs — contain PII)
+# ------------------------------------------------------------
+mpesa-callbacks/
+payment-logs/
+transaction-receipts/
+stk-push-logs/
+
+# ------------------------------------------------------------
+# SMS / WHATSAPP / EMAIL LOGS (contain PII)
+# ------------------------------------------------------------
+sms-logs/
+whatsapp-logs/
+email-logs/
+notification-logs/
+
+# ------------------------------------------------------------
+# GENERATED REPORTS (contain student/financial data)
+# ------------------------------------------------------------
+generated-reports/
+report-exports/
+ministry-reports/
+knec-exports/
+payslips/
+fee-statements/
+
+# ------------------------------------------------------------
+# IDE & EDITOR
+# ------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ------------------------------------------------------------
+# OS
+# ------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ------------------------------------------------------------
+# TERRAFORM / INFRASTRUCTURE (if used for deployment)
+# ------------------------------------------------------------
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars
+
+# ------------------------------------------------------------
+# CI/CD SECRETS
+# ------------------------------------------------------------
+.github/secrets/
+.circleci/config.local.yml
+kubeconfig*
+*.kubeconfig
+helm-values.prod.yaml
+helm-values.staging.yaml
+
+# ------------------------------------------------------------
+# ANALYTICS & MONITORING KEYS
+# ------------------------------------------------------------
+sentry.properties
+google-analytics-key*
+datadog-key*
+newrelic.ini
+
+# ------------------------------------------------------------
+# MISC GENERATED
+# ------------------------------------------------------------
+.cache/
+tmp/
+temp/
+.temp/
+*.tmp
+*.bak
+*.orig
+*.rej
+storybook-static/

@@ -1,0 +1,308 @@
+---
+# =====================================================================
+# Institution OS — Kubernetes Manifests
+# Namespace: institution-os
+# Usage: kubectl apply -f infrastructure/k8s/
+# =====================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: institution-os
+  labels:
+    app: institution-os
+
+---
+# ─── ConfigMap ───────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: institution-os-config
+  namespace: institution-os
+data:
+  PORT: "8080"
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+  STORAGE_BUCKET: "institution-os"
+  STORAGE_USE_SSL: "true"
+  MPESA_ENVIRONMENT: "production"
+  ALLOWED_ORIGINS: "https://app.institution-os.com"
+
+---
+# ─── Secret (create separately, not in git) ──────────────────────
+# kubectl create secret generic institution-os-secrets \
+#   --from-literal=DATABASE_URL="postgres://..." \
+#   --from-literal=REDIS_URL="redis://..." \
+#   --from-literal=ENCRYPTION_KEY="..." \
+#   --from-literal=STORAGE_ACCESS_KEY="..." \
+#   --from-literal=STORAGE_SECRET_KEY="..." \
+#   --from-literal=MPESA_CONSUMER_KEY="..." \
+#   --from-literal=MPESA_CONSUMER_SECRET="..." \
+#   --from-literal=MPESA_SHORTCODE="..." \
+#   --from-literal=MPESA_PASSKEY="..." \
+#   -n institution-os
+
+---
+# ─── JWT Keys Secret ─────────────────────────────────────────────
+# kubectl create secret generic institution-os-jwt \
+#   --from-file=jwt_private.pem=./backend/jwt_private.pem \
+#   --from-file=jwt_public.pem=./backend/jwt_public.pem \
+#   -n institution-os
+
+---
+# ─── Backend Deployment ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: institution-os
+  labels:
+    app: backend
+    component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: institution-os
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+        - name: backend
+          image: ghcr.io/institution-os/institution-os/backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: institution-os-config
+            - secretRef:
+                name: institution-os-secrets
+          env:
+            - name: JWT_PRIVATE_KEY_PATH
+              value: /run/secrets/jwt_private.pem
+            - name: JWT_PUBLIC_KEY_PATH
+              value: /run/secrets/jwt_public.pem
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /run/secrets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: institution-os-jwt
+      imagePullSecrets:
+        - name: ghcr-credentials
+
+---
+# ─── Backend Service ─────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: institution-os
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# ─── Frontend Deployment ─────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: institution-os
+  labels:
+    app: frontend
+    component: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: frontend
+          image: ghcr.io/institution-os/institution-os/frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: https://api.institution-os.com/api/v1
+            - name: NODE_ENV
+              value: production
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      imagePullSecrets:
+        - name: ghcr-credentials
+
+---
+# ─── Frontend Service ────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: institution-os
+  labels:
+    app: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+
+---
+# ─── Ingress ─────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: institution-os-ingress
+  namespace: institution-os
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  tls:
+    - hosts:
+        - app.institution-os.com
+        - api.institution-os.com
+      secretName: institution-os-tls
+  rules:
+    - host: api.institution-os.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 80
+    - host: app.institution-os.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+
+---
+# ─── HorizontalPodAutoscaler — Backend ───────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: institution-os
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# ─── ServiceAccount ──────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: institution-os
+  namespace: institution-os

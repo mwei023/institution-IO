@@ -1,0 +1,1119 @@
+openapi: "3.0.3"
+info:
+  title: Institution OS API
+  description: |
+    REST API for Institution OS — a comprehensive school management platform.
+
+    ## Authentication
+    All protected endpoints require a JWT Bearer token in the `Authorization` header:
+    ```
+    Authorization: Bearer <access_token>
+    ```
+    Include the institution's slug in every request:
+    ```
+    X-Institution-Slug: upendo
+    ```
+
+    ## Multi-Tenancy
+    All data is scoped to the institution identified by the `X-Institution-Slug` header.
+    The institution ID is extracted from the authenticated user's JWT claims.
+
+    ## Error Format
+    All errors follow a consistent structure:
+    ```json
+    {
+      "error": {
+        "code": "STUDENT_NOT_FOUND",
+        "message": "No student found with the given ID",
+        "fields": { "email": "must be a valid email" }
+      }
+    }
+    ```
+  version: "1.0.0"
+  contact:
+    name: Institution OS Engineering
+    email: engineering@institution-os.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.institution-os.com/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+tags:
+  - name: Auth
+    description: Authentication and session management
+  - name: Students
+    description: Student profiles and lifecycle
+  - name: Admissions
+    description: Admission applications and enrollment
+  - name: Finance
+    description: Fee management and payments
+  - name: Academics
+    description: Classes, timetables, attendance, and grades
+  - name: Communications
+    description: Announcements and direct messaging
+  - name: Documents
+    description: Digital locker file management
+  - name: Health
+    description: Service health checks
+
+paths:
+  # ─── Health ────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      operationId: healthLiveness
+      security: []
+      responses:
+        "200":
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      description: Returns 200 only if the database and Redis are reachable.
+      operationId: healthReadiness
+      security: []
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service is not ready
+
+  # ─── Auth ──────────────────────────────────────────────────
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            example:
+              email: principal@upendo.ac.ke
+              password: Admin1234!
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/AccountLocked"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout
+      operationId: logout
+      responses:
+        "204":
+          description: Logged out successfully
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      operationId: refreshToken
+      security: []
+      description: Uses the httpOnly refresh token cookie to issue a new access token.
+      responses:
+        "200":
+          description: New access token issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/mfa/verify:
+    post:
+      tags: [Auth]
+      summary: Verify MFA code
+      operationId: verifyMFA
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MFAVerifyRequest"
+      responses:
+        "200":
+          description: MFA verified, tokens issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current user profile
+      operationId: getMe
+      responses:
+        "200":
+          description: Current user's JWT claims
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserClaims"
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change password
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Password changed successfully
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  # ─── Admissions ────────────────────────────────────────────
+  /admissions:
+    get:
+      tags: [Admissions]
+      summary: List admissions
+      operationId: listAdmissions
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [submitted, under_review, approved, rejected, awaiting_payment, enrolled]
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paginated list of admissions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdmissionListResponse"
+    post:
+      tags: [Admissions]
+      summary: Create admission application
+      operationId: createAdmission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAdmissionRequest"
+      responses:
+        "201":
+          description: Admission created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdmissionResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /admissions/{id}:
+    get:
+      tags: [Admissions]
+      summary: Get admission by ID
+      operationId: getAdmission
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Admission details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdmissionResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admissions/{id}/review:
+    post:
+      tags: [Admissions]
+      summary: Approve or reject an admission
+      operationId: reviewAdmission
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewAdmissionRequest"
+      responses:
+        "200":
+          description: Admission reviewed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdmissionResponse"
+
+  /admissions/{id}/enroll:
+    post:
+      tags: [Admissions]
+      summary: Enroll approved student
+      operationId: enrollStudent
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollStudentRequest"
+      responses:
+        "201":
+          description: Student enrolled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StudentResponse"
+
+  # ─── Students ──────────────────────────────────────────────
+  /students:
+    get:
+      tags: [Students]
+      summary: List students
+      operationId: listStudents
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive, graduated, transferred]
+            default: active
+        - name: class_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: search
+          in: query
+          schema:
+            type: string
+            description: Search by name or admission number
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paginated list of students
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StudentListResponse"
+
+  /students/{id}:
+    get:
+      tags: [Students]
+      summary: Get student profile
+      operationId: getStudent
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Full student profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StudentResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /students/{id}/timeline:
+    get:
+      tags: [Students]
+      summary: Get student journey timeline
+      operationId: getStudentTimeline
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Chronological timeline events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TimelineEvent"
+
+  /students/{id}/parents:
+    get:
+      tags: [Students]
+      summary: Get student's parents/guardians
+      operationId: getStudentParents
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: List of linked parents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ParentGuardian"
+
+  # ─── Finance ───────────────────────────────────────────────
+  /finance/students/{id}/account:
+    get:
+      tags: [Finance]
+      summary: Get student fee account
+      operationId: getFeeAccount
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Fee account summary with invoices
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeeAccountResponse"
+
+  /finance/students/{id}/payments:
+    get:
+      tags: [Finance]
+      summary: Get student payment history
+      operationId: getPaymentHistory
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: List of payments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeePayment"
+
+  /finance/pay/stk-push:
+    post:
+      tags: [Finance]
+      summary: Initiate M-Pesa STK push payment
+      operationId: initiateStkPush
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StkPushRequest"
+      responses:
+        "200":
+          description: STK push initiated — parent will receive prompt on phone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StkPushResponse"
+
+  /finance/pay/manual:
+    post:
+      tags: [Finance]
+      summary: Record a manual payment (cash/bank/cheque)
+      operationId: recordManualPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualPaymentRequest"
+      responses:
+        "201":
+          description: Payment recorded, receipt generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeePayment"
+
+  /finance/summary:
+    get:
+      tags: [Finance]
+      summary: Get fee collection summary
+      operationId: getFeeSummary
+      parameters:
+        - name: term_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Aggregate fee collection statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeeSummaryResponse"
+
+  /finance/mpesa/callback:
+    post:
+      tags: [Finance]
+      summary: M-Pesa Daraja callback (called by Safaricom)
+      operationId: mpesaCallback
+      security: []
+      description: |
+        This endpoint is called by Safaricom Daraja after every STK push outcome.
+        It is NOT called by your application. Always returns HTTP 200 to Daraja.
+      responses:
+        "200":
+          description: Callback acknowledged
+
+  # ─── Academics ─────────────────────────────────────────────
+  /academics/classes:
+    get:
+      tags: [Academics]
+      summary: List all classes
+      operationId: listClasses
+      parameters:
+        - name: academic_year_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: level
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of classes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Class"
+
+  /academics/my-timetable:
+    get:
+      tags: [Academics]
+      summary: Get the current teacher's timetable
+      operationId: getMyTimetable
+      parameters:
+        - name: term_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Timetable periods
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TimetablePeriod"
+
+  /academics/attendance/sheet:
+    get:
+      tags: [Academics]
+      summary: Get attendance sheet for a class
+      operationId: getAttendanceSheet
+      parameters:
+        - name: class_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+            description: Defaults to today
+      responses:
+        "200":
+          description: Attendance session with student roster
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttendanceSession"
+
+  /academics/attendance:
+    post:
+      tags: [Academics]
+      summary: Submit attendance for a class
+      operationId: submitAttendance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TakeAttendanceRequest"
+      responses:
+        "200":
+          description: Attendance submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttendanceSession"
+        "409":
+          description: Session is locked
+
+  # ─── Communications ────────────────────────────────────────
+  /communications/announcements:
+    get:
+      tags: [Communications]
+      summary: List announcements
+      operationId: listAnnouncements
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [general, academic, event, emergency, fee_notice]
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Paginated announcements
+    post:
+      tags: [Communications]
+      summary: Create an announcement
+      operationId: createAnnouncement
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAnnouncementRequest"
+      responses:
+        "201":
+          description: Announcement created
+
+  /communications/messages:
+    get:
+      tags: [Communications]
+      summary: Get message threads
+      operationId: getThreads
+      responses:
+        "200":
+          description: List of conversation threads
+    post:
+      tags: [Communications]
+      summary: Send a direct message
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "201":
+          description: Message sent
+
+  # ─── Documents ─────────────────────────────────────────────
+  /locker/{entity_type}/{entity_id}:
+    get:
+      tags: [Documents]
+      summary: List documents for an entity
+      operationId: listDocuments
+      parameters:
+        - name: entity_type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [student, staff, institution]
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: List of documents
+    post:
+      tags: [Documents]
+      summary: Upload a document
+      operationId: uploadDocument
+      parameters:
+        - name: entity_type
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                title:
+                  type: string
+                document_type:
+                  type: string
+      responses:
+        "201":
+          description: Document uploaded
+
+  /locker/documents/{id}/download:
+    get:
+      tags: [Documents]
+      summary: Get a pre-signed download URL
+      operationId: getDownloadUrl
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Pre-signed URL (expires in 1 hour)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                  expires_in:
+                    type: string
+
+# ─── Components ────────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+
+  responses:
+    Unauthorized:
+      description: Authentication required or token expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AccountLocked:
+      description: Account temporarily locked
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:    { type: string }
+            message: { type: string }
+            fields:
+              type: object
+              additionalProperties:
+                type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:   { type: string, example: ok }
+        database: { type: string, example: ok }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:    { type: string }
+        password: { type: string, minLength: 8 }
+
+    MFAVerifyRequest:
+      type: object
+      required: [mfa_token, totp_code]
+      properties:
+        mfa_token: { type: string }
+        totp_code: { type: string, minLength: 6, maxLength: 6 }
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string }
+        new_password:     { type: string, minLength: 8 }
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:         { type: string }
+        token_type:           { type: string, example: Bearer }
+        expires_in:           { type: integer, example: 900 }
+        mfa_required:         { type: boolean }
+        mfa_token:            { type: string }
+        must_change_password: { type: boolean }
+        user:
+          $ref: "#/components/schemas/UserProfile"
+
+    UserClaims:
+      type: object
+      properties:
+        uid:   { type: string, format: uuid }
+        iid:   { type: string, format: uuid }
+        role:  { type: string }
+        perms: { type: array, items: { type: string } }
+
+    UserProfile:
+      type: object
+      properties:
+        id:                { type: string, format: uuid }
+        institution_id:    { type: string, format: uuid }
+        role:              { type: string }
+        full_name:         { type: string }
+        email:             { type: string }
+        phone:             { type: string }
+        profile_photo_url: { type: string }
+        permissions:       { type: array, items: { type: string } }
+
+    CreateAdmissionRequest:
+      type: object
+      required: [academic_year, intended_class, first_name, last_name, date_of_birth, gender, parent_name, parent_relationship, parent_phone]
+      properties:
+        academic_year:     { type: string, example: "2024" }
+        intended_class:    { type: string, example: Form 1 }
+        first_name:        { type: string }
+        last_name:         { type: string }
+        date_of_birth:     { type: string, format: date }
+        gender:            { type: string, enum: [M, F, O] }
+        parent_name:       { type: string }
+        parent_relationship: { type: string }
+        parent_phone:      { type: string }
+        boarding_required: { type: boolean }
+        transport_required:{ type: boolean }
+
+    ReviewAdmissionRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [approve, reject] }
+        notes:  { type: string }
+
+    EnrollStudentRequest:
+      type: object
+      required: [class_id]
+      properties:
+        class_id: { type: string, format: uuid }
+        bed_id:   { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+
+    AdmissionResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:                 { type: string, format: uuid }
+            application_number: { type: string }
+            first_name:         { type: string }
+            last_name:          { type: string }
+            status:             { type: string }
+            created_at:         { type: string, format: date-time }
+
+    AdmissionListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdmissionResponse/properties/data"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    StudentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:               { type: string, format: uuid }
+            admission_number: { type: string }
+            first_name:       { type: string }
+            last_name:        { type: string }
+            date_of_birth:    { type: string, format: date }
+            gender:           { type: string }
+            status:           { type: string }
+            is_boarder:       { type: boolean }
+
+    StudentListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:               { type: string, format: uuid }
+              admission_number: { type: string }
+              full_name:        { type: string }
+              class_name:       { type: string }
+              status:           { type: string }
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    TimelineEvent:
+      type: object
+      properties:
+        id:          { type: string, format: uuid }
+        event_type:  { type: string }
+        title:       { type: string }
+        description: { type: string }
+        event_date:  { type: string, format: date }
+
+    ParentGuardian:
+      type: object
+      properties:
+        id:                 { type: string, format: uuid }
+        first_name:         { type: string }
+        last_name:          { type: string }
+        relationship:       { type: string }
+        phone:              { type: string }
+        email:              { type: string }
+        is_primary_contact: { type: boolean }
+
+    FeeAccountResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            student_id:   { type: string, format: uuid }
+            student_name: { type: string }
+            total_billed: { type: number }
+            total_paid:   { type: number }
+            balance:      { type: number }
+            last_payment: { type: string, format: date-time }
+
+    FeePayment:
+      type: object
+      properties:
+        id:              { type: string, format: uuid }
+        receipt_number:  { type: string }
+        amount:          { type: number }
+        payment_method:  { type: string }
+        mpesa_reference: { type: string }
+        received_at:     { type: string, format: date-time }
+
+    StkPushRequest:
+      type: object
+      required: [student_id, amount, phone]
+      properties:
+        student_id: { type: string, format: uuid }
+        amount:     { type: number, minimum: 1 }
+        phone:      { type: string, example: "+254712345678" }
+
+    StkPushResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            checkout_request_id: { type: string }
+            merchant_request_id: { type: string }
+            message:             { type: string }
+
+    ManualPaymentRequest:
+      type: object
+      required: [student_id, amount, payment_method]
+      properties:
+        student_id:     { type: string, format: uuid }
+        amount:         { type: number }
+        payment_method: { type: string, enum: [cash, bank_transfer, cheque, waiver] }
+        bank_reference: { type: string }
+
+    FeeSummaryResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            total_students:    { type: integer }
+            total_billed:      { type: number }
+            total_collected:   { type: number }
+            total_outstanding: { type: number }
+            fully_paid_count:  { type: integer }
+            partial_count:     { type: integer }
+            unpaid_count:      { type: integer }
+
+    Class:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        name:         { type: string }
+        stream:       { type: string }
+        level:        { type: integer }
+        class_teacher:{ type: string }
+        capacity:     { type: integer }
+        enrollment:   { type: integer }
+
+    TimetablePeriod:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        subject_name: { type: string }
+        teacher_name: { type: string }
+        day_of_week:  { type: integer }
+        period_number:{ type: integer }
+        start_time:   { type: string }
+        end_time:     { type: string }
+        room:         { type: string }
+
+    AttendanceSession:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        class_id:     { type: string, format: uuid }
+        session_date: { type: string, format: date }
+        status:       { type: string }
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttendanceRecord"
+
+    AttendanceRecord:
+      type: object
+      properties:
+        student_id: { type: string, format: uuid }
+        name:       { type: string }
+        status:     { type: string, enum: [present, absent, late, excused] }
+        remarks:    { type: string }
+
+    TakeAttendanceRequest:
+      type: object
+      required: [class_id, session_date, session_type, records]
+      properties:
+        class_id:     { type: string, format: uuid }
+        session_date: { type: string, format: date }
+        session_type: { type: string, enum: [daily, period] }
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttendanceRecord"
+
+    CreateAnnouncementRequest:
+      type: object
+      required: [title, body, type, audience]
+      properties:
+        title:     { type: string }
+        body:      { type: string }
+        type:      { type: string, enum: [general, academic, event, emergency, fee_notice] }
+        audience:  { type: string, enum: [all, parents, teachers, students, staff] }
+        send_sms:  { type: boolean }
+        send_push: { type: boolean }
+        publish:   { type: boolean }
+
+    SendMessageRequest:
+      type: object
+      required: [recipient_id, body]
+      properties:
+        recipient_id: { type: string, format: uuid }
+        body:         { type: string, maxLength: 2000 }
+
+    Pagination:
+      type: object
+      properties:
+        total:     { type: integer }
+        page:      { type: integer }
+        page_size: { type: integer }
+        has_next:  { type: boolean }
+
+security:
+  - BearerAuth: []

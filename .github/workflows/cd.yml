@@ -1,0 +1,68 @@
+name: CD — Deploy to Staging
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to Staging VPS
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: []  # Trigger after CI passes (add CI job ID here if running sequentially)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key:      ${{ secrets.STAGING_SSH_KEY }}
+          port:     22
+          script: |
+            set -e
+            cd /opt/institution-os
+
+            # Pull latest images
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            docker pull ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
+            docker pull ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
+
+            # Update image tags in compose
+            sed -i "s|backend:.*|backend:${{ github.sha }}|g" docker-compose.prod.yml
+            sed -i "s|frontend:.*|frontend:${{ github.sha }}|g" docker-compose.prod.yml
+
+            # Run migrations before restarting
+            docker run --rm \
+              --network ios-net \
+              --env-file .env.prod \
+              ghcr.io/${{ github.repository }}/backend:${{ github.sha }} \
+              ./server migrate up
+
+            # Rolling restart
+            docker-compose -f docker-compose.prod.yml up -d --no-deps backend
+            sleep 10
+            docker-compose -f docker-compose.prod.yml up -d --no-deps frontend
+
+            # Health check
+            sleep 15
+            curl -f http://localhost:8080/health/ready || (echo "Health check failed!" && exit 1)
+
+            echo "Deployment complete: ${{ github.sha }}"
+
+      - name: Notify Slack on success
+        if: success()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"✅ Institution OS deployed to staging — commit ${{ github.sha }}"}' \
+            ${{ secrets.SLACK_WEBHOOK }} || true
+
+      - name: Notify Slack on failure
+        if: failure()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"❌ Institution OS staging deploy FAILED — commit ${{ github.sha }}"}' \
+            ${{ secrets.SLACK_WEBHOOK }} || true
