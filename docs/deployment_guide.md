@@ -21,7 +21,7 @@
 
 ### 2.1 Clone & Configure
 ```bash
-git clone https://github.com/your-org/institution-os.git
+git clone https://github.com/mwei023/institution-os.git
 cd institution-os
 
 # Copy environment files

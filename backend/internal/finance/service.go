@@ -163,6 +163,19 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 		return fmt.Errorf("create payment: %w", err)
 	}
 
+	// Allocate this payment across the student's outstanding invoices
+	// (oldest-first, per current default policy) and recalculate each.
+	touchedInvoices, err := s.repo.AllocatePayment(ctx, institutionID, *studentID, payment.ID, tx.Amount)
+	if err != nil {
+		log.Error().Err(err).Msg("allocate mpesa payment")
+		// Don't fail the callback — payment is recorded, reconciliation can happen manually
+	}
+	for _, invID := range touchedInvoices {
+		if err := s.repo.UpdateInvoicePaidAmount(ctx, institutionID, invID); err != nil {
+			log.Error().Err(err).Str("invoice_id", invID.String()).Msg("update invoice after mpesa allocation")
+		}
+	}
+
 	// Mark transaction as processed
 	if err := s.repo.MarkMpesaTransactionProcessed(ctx, institutionID, *tx.MpesaReceiptNumber, payment.ID); err != nil {
 		log.Error().Err(err).Msg("mark mpesa processed")
@@ -217,6 +230,10 @@ func (s *Service) RecordManualPayment(ctx context.Context, institutionID, receiv
 
 	// Update invoice if linked
 	if req.InvoiceID != nil {
+		if err := s.repo.CreatePaymentAllocation(ctx, institutionID, payment.ID, *req.InvoiceID, payment.Amount); err != nil {
+			log.Error().Err(err).Msg("create payment allocation for manual payment")
+    }
+
 		if err := s.repo.UpdateInvoicePaidAmount(ctx, institutionID, *req.InvoiceID); err != nil {
 			log.Error().Err(err).Msg("update invoice paid amount")
 		}
@@ -254,4 +271,9 @@ func formatPhone(phone string) string {
 		phone = "254" + phone[1:]
 	}
 	return phone
+}
+
+// GetOutstandingBalances returns every student with an unpaid balance.
+func (s *Service) GetOutstandingBalances(ctx context.Context, institutionID uuid.UUID) ([]*StudentBalance, error) {
+	return s.repo.ListStudentsWithOutstandingBalance(ctx, institutionID)
 }

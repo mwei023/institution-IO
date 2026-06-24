@@ -114,6 +114,8 @@ export const financeAPI = {
     api.post("/finance/pay/manual", data),
   getSummary: (termId?: string) =>
     api.get("/finance/summary", { params: termId ? { term_id: termId } : {} }),
+  getOutstandingBalances: () =>
+    api.get("/finance/outstanding"),
 };
 
 export const announcementsAPI = {

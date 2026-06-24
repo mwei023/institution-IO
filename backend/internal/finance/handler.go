@@ -162,3 +162,17 @@ func (h *Handler) GetFeeCollectionSummary(w http.ResponseWriter, r *http.Request
 
 	response.Ok(w, summary)
 }
+
+// GetOutstandingBalances handles GET /api/v1/finance/outstanding
+func (h *Handler) GetOutstandingBalances(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+
+	balances, err := h.svc.GetOutstandingBalances(r.Context(), institutionID)
+	if err != nil {
+		log.Error().Err(err).Msg("get outstanding balances")
+		response.InternalError(w)
+		return
+	}
+
+	response.Ok(w, balances)
+}

@@ -478,3 +478,36 @@ func (r *Repository) GetCurrentTerm(ctx context.Context, institutionID uuid.UUID
 	}
 	return &termID, nil
 }
+
+// PrimaryContactInfo holds what's needed to notify a student's primary parent.
+type PrimaryContactInfo struct {
+	ParentPhone string
+	ParentName  string
+	StudentName string
+}
+
+// GetPrimaryContactForStudent returns the primary parent/guardian contact
+// details for a student, for use in notification payloads.
+func (r *Repository) GetPrimaryContactForStudent(ctx context.Context, institutionID, studentID uuid.UUID) (*PrimaryContactInfo, error) {
+	var info PrimaryContactInfo
+	err := r.db.QueryRow(ctx, `
+		SELECT s.first_name || ' ' || s.last_name AS student_name,
+		       pg.first_name || ' ' || pg.last_name AS parent_name,
+		       pg.phone
+		FROM students s
+		JOIN student_parent_links spl ON spl.student_id = s.id
+		JOIN parent_guardians pg ON pg.id = spl.parent_id
+		WHERE s.institution_id = $1 AND s.id = $2
+		  AND pg.is_primary_contact = true
+		  AND pg.deleted_at IS NULL
+		LIMIT 1`,
+		institutionID, studentID,
+	).Scan(&info.StudentName, &info.ParentName, &info.ParentPhone)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("no primary contact found for student %s", studentID)
+		}
+		return nil, err
+	}
+	return &info, nil
+}

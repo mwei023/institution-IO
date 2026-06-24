@@ -25,7 +25,7 @@ import (
 	"institution-os/internal/student"
 	"institution-os/pkg/config"
 	"institution-os/pkg/db"
-	"institution-os/pkg/events"
+	
 	pkglogger "institution-os/pkg/logger"
 )
 
@@ -51,12 +51,14 @@ func main() {
 	defer dbPool.Close()
 	log.Info().Msg("database connected")
 
-	// Event publisher (noop Phase 1 — swap for Redis Streams in Phase 2)
-	publisher := &events.NoopPublisher{}
-
-	// ── Services ──────────────────────────────────────────────────
+// ── Services ──────────────────────────────────────────────────
 	auditSvc := audit.NewService(dbPool)
-	_ = notification.NewService()
+	notificationSvc := notification.NewService()
+
+	// Event publisher — dispatches synchronously to the notification service.
+	// Phase 1: single process, no queue. Swap for Redis Streams in Phase 2
+	// once volume or reliability requirements justify the added complexity.
+	publisher := notification.NewEventPublisher(notificationSvc)
 
 	authRepo := auth.NewRepository(dbPool)
 	authSvc, err := auth.NewService(authRepo, cfg)
@@ -162,6 +164,7 @@ func main() {
 				r.With(auth.RequirePermission("fees:read")).Get("/students/{id}/account",  financeHandler.GetFeeAccount)
 				r.With(auth.RequirePermission("fees:read")).Get("/students/{id}/payments", financeHandler.GetPaymentHistory)
 				r.With(auth.RequirePermission("fees:read")).Get("/summary",                financeHandler.GetFeeCollectionSummary)
+				r.With(auth.RequirePermission("fees:read")).Get("/outstanding",            financeHandler.GetOutstandingBalances)
 				r.Post("/pay/stk-push",                                                   financeHandler.InitiateSTKPush)
 				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/manual",         financeHandler.RecordManualPayment)
 			})

@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"institution-os/pkg/db"
+
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -28,21 +30,37 @@ func NewRepository(db *db.Pool) *Repository {
 	return &Repository{db: db}
 }
 
+
 // GetStudentFeeAccount retrieves the fee summary for a student.
+//
+// Uses pre-aggregated subqueries (not direct joins) for the same reason as
+// ListStudentsWithOutstandingBalance: avoids row fan-out when a student has
+// more than one fee_payments row.
 func (r *Repository) GetStudentFeeAccount(ctx context.Context, institutionID, studentID uuid.UUID) (*StudentFeeAccount, error) {
 	query := `
 		SELECT
 			s.id,
 			s.first_name || ' ' || s.last_name AS student_name,
-			COALESCE(SUM(fi.total_amount), 0) AS total_billed,
-			COALESCE(SUM(fi.paid_amount), 0) AS total_paid,
-			COALESCE(SUM(fi.total_amount - fi.paid_amount), 0) AS balance,
-			MAX(fp.received_at) AS last_payment
+			COALESCE(inv.total_billed, 0) AS total_billed,
+			COALESCE(inv.total_paid, 0) AS total_paid,
+			COALESCE(inv.total_billed, 0) - COALESCE(inv.total_paid, 0) AS balance,
+			pay.last_payment_at
 		FROM students s
-		LEFT JOIN fee_invoices fi ON fi.student_id = s.id AND fi.institution_id = $1 AND fi.deleted_at IS NULL
-		LEFT JOIN fee_payments fp ON fp.student_id = s.id AND fp.institution_id = $1 AND fp.deleted_at IS NULL
-		WHERE s.institution_id = $1 AND s.id = $2 AND s.deleted_at IS NULL
-		GROUP BY s.id, s.first_name, s.last_name`
+		LEFT JOIN (
+			SELECT student_id,
+			       SUM(total_amount) AS total_billed,
+			       SUM(paid_amount) AS total_paid
+			FROM fee_invoices
+			WHERE institution_id = $1 AND deleted_at IS NULL
+			GROUP BY student_id
+		) inv ON inv.student_id = s.id
+		LEFT JOIN (
+			SELECT student_id, MAX(received_at) AS last_payment_at
+			FROM fee_payments
+			WHERE institution_id = $1 AND deleted_at IS NULL
+			GROUP BY student_id
+		) pay ON pay.student_id = s.id
+		WHERE s.institution_id = $1 AND s.id = $2 AND s.deleted_at IS NULL`
 
 	var acct StudentFeeAccount
 	err := r.db.QueryRow(ctx, query, institutionID, studentID).Scan(
@@ -133,25 +151,32 @@ func (r *Repository) CreatePayment(ctx context.Context, p *FeePayment) error {
 
 // UpdateInvoicePaidAmount recalculates and updates the paid amount on an invoice.
 func (r *Repository) UpdateInvoicePaidAmount(ctx context.Context, institutionID, invoiceID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE fee_invoices fi
-		SET paid_amount = COALESCE((
-			SELECT SUM(fp.amount)
-			FROM fee_payments fp
-			WHERE fp.invoice_id = fi.id
-			  AND fp.institution_id = fi.institution_id
+	tag, err := r.db.Exec(ctx, `
+		WITH new_paid AS (
+			SELECT COALESCE(SUM(pa.amount_applied), 0) AS amount
+			FROM payment_allocations pa
+			JOIN fee_payments fp ON fp.id = pa.payment_id
+			WHERE pa.invoice_id = $2
+			  AND pa.institution_id = $1
 			  AND fp.deleted_at IS NULL
 			  AND fp.is_reversed = false
-		), 0),
-		status = CASE
-			WHEN paid_amount >= total_amount THEN 'paid'
-			WHEN paid_amount > 0 THEN 'partial'
-			ELSE 'unpaid'
-		END,
-		updated_at = NOW()
-		WHERE institution_id = $1 AND id = $2`,
+		)
+		UPDATE fee_invoices fi
+		SET paid_amount = new_paid.amount,
+		    status = CASE
+		        WHEN new_paid.amount >= fi.total_amount THEN 'paid'
+		        WHEN new_paid.amount > 0 THEN 'partial'
+		        ELSE 'unpaid'
+		    END,
+		    updated_at = NOW()
+		FROM new_paid
+		WHERE fi.institution_id = $1 AND fi.id = $2`,
 		institutionID, invoiceID,
 	)
+	log.Debug().
+		Str("invoice_id", invoiceID.String()).
+		Int64("rows_affected", tag.RowsAffected()).
+		Msg("invoice paid_amount recalculated")
 	return err
 }
 
@@ -268,4 +293,145 @@ func (r *Repository) GetFeeCollectionSummary(ctx context.Context, institutionID 
 	var result map[string]interface{}
 	_ = json.Unmarshal(b, &result)
 	return result, nil
+}
+
+// StudentBalance represents one row in the outstanding-fees list.
+type StudentBalance struct {
+	StudentID     uuid.UUID  `json:"student_id"`
+	StudentName   string     `json:"student_name"`
+	AdmissionNo   string     `json:"admission_number"`
+	ClassName     *string    `json:"class_name"`
+	TotalBilled   float64    `json:"total_billed"`
+	TotalPaid     float64    `json:"total_paid"`
+	Balance       float64    `json:"balance"`
+	LastPaymentAt *time.Time `json:"last_payment_at"`
+}
+
+// ListStudentsWithOutstandingBalance returns every student in the institution
+// who currently owes money, ordered by largest balance first.
+//
+// Uses pre-aggregated subqueries (not direct joins) to avoid a fan-out bug:
+// joining fee_invoices and fee_payments directly on student_id multiplies
+// rows when a student has more than one payment, inflating SUM() totals.
+func (r *Repository) ListStudentsWithOutstandingBalance(ctx context.Context, institutionID uuid.UUID) ([]*StudentBalance, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT
+			s.id,
+			s.first_name || ' ' || s.last_name AS student_name,
+			s.admission_number,
+			c.name AS class_name,
+			inv.total_billed,
+			inv.total_paid,
+			inv.total_billed - inv.total_paid AS balance,
+			pay.last_payment_at
+		FROM students s
+		LEFT JOIN classes c ON c.id = s.current_class_id
+		JOIN (
+			SELECT student_id,
+			       SUM(total_amount) AS total_billed,
+			       SUM(paid_amount) AS total_paid
+			FROM fee_invoices
+			WHERE institution_id = $1 AND deleted_at IS NULL
+			GROUP BY student_id
+		) inv ON inv.student_id = s.id
+		LEFT JOIN (
+			SELECT student_id, MAX(received_at) AS last_payment_at
+			FROM fee_payments
+			WHERE institution_id = $1 AND deleted_at IS NULL
+			GROUP BY student_id
+		) pay ON pay.student_id = s.id
+		WHERE s.institution_id = $1
+		  AND s.deleted_at IS NULL
+		  AND (inv.total_billed - inv.total_paid) > 0
+		ORDER BY balance DESC`,
+		institutionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list outstanding balances: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*StudentBalance
+	for rows.Next() {
+		var b StudentBalance
+		if err := rows.Scan(
+			&b.StudentID, &b.StudentName, &b.AdmissionNo, &b.ClassName,
+			&b.TotalBilled, &b.TotalPaid, &b.Balance, &b.LastPaymentAt,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, &b)
+	}
+	return result, rows.Err()
+}
+
+// AllocatePayment applies a payment amount across a student's outstanding
+// invoices, oldest first, and returns the invoice IDs that received money.
+// This is intentionally isolated so a configurable allocation policy can
+// replace the ordering logic later without touching callers.
+// AllocatePayment applies a payment across a student's outstanding invoices,
+// oldest first, recording exactly how much was applied to each invoice in
+// payment_allocations. Returns the invoice IDs that received money.
+func (r *Repository) AllocatePayment(ctx context.Context, institutionID, studentID, paymentID uuid.UUID, amount float64) ([]uuid.UUID, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, balance
+		FROM fee_invoices
+		WHERE institution_id = $1 AND student_id = $2
+		  AND deleted_at IS NULL
+		  AND status IN ('unpaid', 'partial')
+		ORDER BY due_date ASC NULLS LAST, created_at ASC`,
+		institutionID, studentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetch outstanding invoices: %w", err)
+	}
+	defer rows.Close()
+
+	type invoiceBalance struct {
+		id      uuid.UUID
+		balance float64
+	}
+	var invoices []invoiceBalance
+	for rows.Next() {
+		var ib invoiceBalance
+		if err := rows.Scan(&ib.id, &ib.balance); err != nil {
+			return nil, err
+		}
+		invoices = append(invoices, ib)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	remaining := amount
+	var touched []uuid.UUID
+	for _, inv := range invoices {
+		if remaining <= 0 {
+			break
+		}
+		applied := inv.balance
+		if remaining < applied {
+			applied = remaining
+		}
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO payment_allocations (id, institution_id, payment_id, invoice_id, amount_applied, created_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())`,
+			uuid.New(), institutionID, paymentID, inv.id, applied,
+		)
+		if err != nil {
+			return touched, fmt.Errorf("insert payment allocation for invoice %s: %w", inv.id, err)
+		}
+		touched = append(touched, inv.id)
+		remaining -= applied
+	}
+	return touched, nil
+}
+
+func (r *Repository) CreatePaymentAllocation(ctx context.Context, institutionID, paymentID, invoiceID uuid.UUID, amount float64) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO payment_allocations (id, institution_id, payment_id, invoice_id, amount_applied, created_at)
+		VALUES ($1,$2,$3,$4,$5,NOW())`,
+		uuid.New(), institutionID, paymentID, invoiceID, amount,
+	)
+	return err
 }

@@ -121,33 +121,31 @@ export default function TeacherDashboard() {
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle>Parent Messages</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                {recentMessages.map((msg) => (
-                  <div
+                </CardHeader>
+                <CardContent className="p-0">
+                  {recentMessages.map((msg) => (
+                    <div
                     key={msg.id}
                     className={`px-4 py-3 border-b border-neutral-50 last:border-0 ${
                       msg.unread ? "bg-primary-50/50" : ""
                     }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-xs font-semibold text-neutral-700 leading-tight">{msg.from}</p>
-                      <span className="text-xs text-neutral-400 whitespace-nowrap">{msg.time}</span>
-                    </div>
-                      <p className="text-xs text-neutral-500 mt-0.5 truncate">{msg.body}</p>
-                    </div>
-                  ))}
-                  <div className="p-4">
-                    <Button size="sm" variant="outline" className="w-full" asChild>
-                      <a href="/teacher/messages">
-                        View All Messages
-                      </a>
-                    </Button>
-                  </div>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-xs font-semibold text-neutral-700 leading-tight">{msg.from}</p>
+                        <span className="text-xs text-neutral-400 whitespace-nowrap">{msg.time}</span>
+                        </div>
+                        <p className="text-xs text-neutral-500 mt-0.5 truncate">{msg.body}</p>
+                        </div>
+                      ))}
+                      <div className="p-4">
+                        <Button size="sm" variant="outline" className="w-full" asChild>
+                          <a href="/teacher/messages">View All Messages</a>
+                          </Button>
+                          </div>
+                          </CardContent>
+                          </Card>
+                          </div>
+                          </div>
 
         {/* Assignments pending marking */}
         <Card>

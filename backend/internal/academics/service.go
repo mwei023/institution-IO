@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"institution-os/pkg/events"
 )
 
@@ -125,10 +126,21 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
 	// Publish absent events so notifications are sent to parents
 	for _, entry := range req.Records {
 		if entry.Status == "absent" {
+			contact, err := s.repo.GetPrimaryContactForStudent(ctx, institutionID, entry.StudentID)
+			if err != nil {
+				log.Error().Err(err).Str("student_id", entry.StudentID.String()).
+					Msg("could not find primary contact for absent student — skipping notification")
+				continue
+			}
+
 			evt := events.New(events.EventStudentAbsent, institutionID.String())
 			evt.EntityType = "student"
 			evt.EntityID = entry.StudentID.String()
 			evt.ActorID = teacherID.String()
+			evt.Payload = map[string]interface{}{
+				"parent_phone": contact.ParentPhone,
+				"student_name": contact.StudentName,
+			}
 			_ = s.publisher.Publish(evt)
 		}
 	}
