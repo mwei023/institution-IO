@@ -123,3 +123,20 @@ export const announcementsAPI = {
     api.get("/announcements", { params }),
   create: (data: Record<string, unknown>) => api.post("/announcements", data),
 };
+
+export const academicsAPI = {
+  listClasses: (params?: { level?: number; academic_year_id?: string }) =>
+    api.get("/academics/classes", { params }),
+  getAttendanceSheet: (classId: string, date?: string) =>
+    api.get("/academics/attendance/sheet", { params: { class_id: classId, date } }),
+  submitAttendance: (data: {
+    class_id: string;
+    session_date: string;
+    session_type: "daily" | "period";
+    records: Array<{ student_id: string; status: string; remarks?: string }>;
+  }) => api.post("/academics/attendance", data),
+  getAttendanceSummary: (classId: string, startDate?: string, endDate?: string) =>
+    api.get("/academics/attendance/summary", {
+      params: { class_id: classId, start_date: startDate, end_date: endDate },
+    }),
+};

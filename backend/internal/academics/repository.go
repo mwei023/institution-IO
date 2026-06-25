@@ -213,19 +213,20 @@ func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, 
 
 // GetOrCreateSession finds or creates today's attendance session for a class.
 func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, classID, teacherID uuid.UUID, sessionDate time.Time, sessionType string) (*AttendanceSession, error) {
-	// Try to find existing session
 	var session AttendanceSession
 	err := r.db.QueryRow(ctx, `
-		SELECT id, institution_id, class_id, teacher_id, session_date, session_type, status, submitted_at, created_at
-		FROM attendance_sessions
-		WHERE institution_id = $1
-		  AND class_id = $2
-		  AND session_date = $3
-		  AND session_type = $4
-		  AND period_id IS NULL`,
+		SELECT s.id, s.institution_id, s.class_id, c.name, s.teacher_id,
+		       s.session_date, s.session_type, s.status, s.submitted_at, s.created_at
+		FROM attendance_sessions s
+		JOIN classes c ON c.id = s.class_id
+		WHERE s.institution_id = $1
+		  AND s.class_id = $2
+		  AND s.session_date = $3
+		  AND s.session_type = $4
+		  AND s.period_id IS NULL`,
 		institutionID, classID, sessionDate, sessionType,
 	).Scan(
-		&session.ID, &session.InstitutionID, &session.ClassID, &session.TeacherID,
+		&session.ID, &session.InstitutionID, &session.ClassID, &session.ClassName, &session.TeacherID,
 		&session.SessionDate, &session.SessionType, &session.Status, &session.SubmittedAt, &session.CreatedAt,
 	)
 
@@ -248,10 +249,16 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
+	var className string
+	if err := r.db.QueryRow(ctx, `SELECT name FROM classes WHERE id = $1`, classID).Scan(&className); err != nil {
+		className = ""
+	}
+
 	return &AttendanceSession{
 		ID:            newID,
 		InstitutionID: institutionID,
 		ClassID:       classID,
+		ClassName:     className,
 		TeacherID:     teacherID,
 		SessionDate:   sessionDate,
 		SessionType:   sessionType,
@@ -261,16 +268,24 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 }
 
 // GetSessionStudents returns all active students in a class for attendance taking.
-func (r *Repository) GetSessionStudents(ctx context.Context, institutionID, classID uuid.UUID) ([]*AttendanceRecord, error) {
+// GetSessionStudents returns all active students in a class for attendance
+// taking, along with their actual saved status/remarks if a record already
+// exists for this session — otherwise defaults to "present" for a fresh sheet.
+func (r *Repository) GetSessionStudents(ctx context.Context, institutionID, classID, sessionID uuid.UUID) ([]*AttendanceRecord, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT s.id, s.first_name || ' ' || s.last_name
+		SELECT s.id, s.first_name || ' ' || s.last_name,
+		       COALESCE(ar.id, '00000000-0000-0000-0000-000000000000'),
+		       COALESCE(ar.status, 'present'),
+		       ar.remarks
 		FROM students s
+		LEFT JOIN attendance_records ar
+		       ON ar.student_id = s.id AND ar.session_id = $3
 		WHERE s.institution_id = $1
 		  AND s.current_class_id = $2
 		  AND s.status = 'active'
 		  AND s.deleted_at IS NULL
 		ORDER BY s.last_name, s.first_name`,
-		institutionID, classID,
+		institutionID, classID, sessionID,
 	)
 	if err != nil {
 		return nil, err
@@ -279,12 +294,11 @@ func (r *Repository) GetSessionStudents(ctx context.Context, institutionID, clas
 
 	var records []*AttendanceRecord
 	for rows.Next() {
-		var r AttendanceRecord
-		r.Status = "present" // default
-		if err := rows.Scan(&r.StudentID, &r.Name); err != nil {
+		var rec AttendanceRecord
+		if err := rows.Scan(&rec.StudentID, &rec.Name, &rec.ID, &rec.Status, &rec.Remarks); err != nil {
 			return nil, err
 		}
-		records = append(records, &r)
+		records = append(records, &rec)
 	}
 	return records, rows.Err()
 }
@@ -510,4 +524,29 @@ func (r *Repository) GetPrimaryContactForStudent(ctx context.Context, institutio
 		return nil, err
 	}
 	return &info, nil
+}
+
+// GetActiveStudentIDsForClass returns the IDs of all active students
+// currently enrolled in a class, for roster validation.
+func (r *Repository) GetActiveStudentIDsForClass(ctx context.Context, institutionID, classID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id FROM students
+		WHERE institution_id = $1 AND current_class_id = $2
+		  AND status = 'active' AND deleted_at IS NULL`,
+		institutionID, classID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

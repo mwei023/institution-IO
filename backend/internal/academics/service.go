@@ -93,8 +93,8 @@ func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID
 		return nil, err
 	}
 
-	// Load existing records or blank roster
-	records, err := s.repo.GetSessionStudents(ctx, institutionID, classID)
+	// Load real saved records if this session already has them, otherwise blank roster
+	records, err := s.repo.GetSessionStudents(ctx, institutionID, classID, session.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -103,11 +103,31 @@ func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID
 	return session, nil
 }
 
+
+// SubmitAttendance saves attendance records and locks the session.
 // SubmitAttendance saves attendance records and locks the session.
 func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID uuid.UUID, req *TakeAttendanceRequest) (*AttendanceSession, error) {
 	sessionDate, err := time.Parse("2006-01-02", req.SessionDate)
 	if err != nil {
 		return nil, fmt.Errorf("invalid session_date format")
+	}
+
+	// Validate every student in the request actually belongs to this class,
+	// before writing anything. Without this check, a wrong class_id in the
+	// request silently creates attendance records for students who were
+	// never enrolled in that class.
+	validStudentIDs, err := s.repo.GetActiveStudentIDsForClass(ctx, institutionID, req.ClassID)
+	if err != nil {
+		return nil, fmt.Errorf("verify class roster: %w", err)
+	}
+	validSet := make(map[uuid.UUID]bool, len(validStudentIDs))
+	for _, id := range validStudentIDs {
+		validSet[id] = true
+	}
+	for _, entry := range req.Records {
+		if !validSet[entry.StudentID] {
+			return nil, fmt.Errorf("student %s is not enrolled in class %s", entry.StudentID, req.ClassID)
+		}
 	}
 
 	session, err := s.repo.GetOrCreateSession(ctx, institutionID, req.ClassID, teacherID, sessionDate, req.SessionType)

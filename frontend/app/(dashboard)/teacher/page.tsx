@@ -8,17 +8,16 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { useAuthStore } from "@/lib/store";
 
-// Demo data for teacher dashboard
 const todayPeriods = [
-  { time: "7:30 – 8:30",   subject: "English",     class: "Form 2 East",  room: "C4", status: "done" },
-  { time: "8:30 – 9:30",   subject: "English",     class: "Form 1 North", room: "B2", status: "current" },
-  { time: "10:00 – 11:00", subject: "English",     class: "Form 3 West",  room: "C4", status: "upcoming" },
-  { time: "11:00 – 12:00", subject: "English Lit", class: "Form 4 East",  room: "C4", status: "upcoming" },
-  { time: "2:00 – 3:00",   subject: "English",     class: "Form 2 West",  room: "B3", status: "upcoming" },
+  { time: "7:30 - 8:30",   subject: "English",     class: "Form 2 East",  room: "C4", status: "done" },
+  { time: "8:30 - 9:30",   subject: "English",     class: "Form 1 North", room: "B2", status: "current" },
+  { time: "10:00 - 11:00", subject: "English",     class: "Form 3 West",  room: "C4", status: "upcoming" },
+  { time: "11:00 - 12:00", subject: "English Lit", class: "Form 4 East",  room: "C4", status: "upcoming" },
+  { time: "2:00 - 3:00",   subject: "English",     class: "Form 2 West",  room: "B3", status: "upcoming" },
 ];
 
 const pendingAssignments = [
-  { id: "1", title: "Essay — Oral Literature", class: "Form 2 East", due: "Tomorrow",  submitted: 28, total: 42 },
+  { id: "1", title: "Essay - Oral Literature", class: "Form 2 East", due: "Tomorrow",  submitted: 28, total: 42 },
   { id: "2", title: "Grammar Exercise 5",      class: "Form 1 North", due: "Fri",      submitted: 35, total: 40 },
   { id: "3", title: "Book Review",             class: "Form 4 East", due: "Next Mon",  submitted: 19, total: 38 },
 ];
@@ -39,11 +38,10 @@ export default function TeacherDashboard() {
         <div className="page-header">
           <div>
             <h1 className="page-title">Good morning, {user?.full_name.split(" ")[0]}</h1>
-            <p className="page-subtitle">Term 3, 2024 · Week 4</p>
+            <p className="page-subtitle">Term 3, 2024 - Week 4</p>
           </div>
         </div>
 
-        {/* Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard label="My Classes"       value="5" sub="This term"                  icon={Users}          iconColor="text-primary-500" />
           <StatCard label="Attendance Done"  value="3/5" sub="Today's sessions"         icon={CheckCircle2}   iconColor="text-success" />
@@ -52,14 +50,11 @@ export default function TeacherDashboard() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Today's timetable */}
           <Card className="lg:col-span-2">
             <CardHeader className="flex-row items-center justify-between pb-3">
-              <CardTitle>Today&apos;s Timetable</CardTitle>
-              <Button size="sm" variant="outline" asChild>
-                <a href="/teacher/attendance">
-                  Take Attendance
-                </a>
+              <CardTitle>Today's Timetable</CardTitle>
+              <Button size="sm" variant="outline" onClick={() => { window.location.href = "/teacher/attendance"; }}>
+                Take Attendance
               </Button>
             </CardHeader>
             <CardContent className="p-0">
@@ -76,7 +71,7 @@ export default function TeacherDashboard() {
                     </div>
                     <div className="flex-1">
                       <p className="text-sm font-medium text-neutral-800">{period.subject}</p>
-                      <p className="text-xs text-neutral-500">{period.class} · Room {period.room}</p>
+                      <p className="text-xs text-neutral-500">{period.class} - Room {period.room}</p>
                     </div>
                     <div>
                       {period.status === "current" && (
@@ -98,9 +93,7 @@ export default function TeacherDashboard() {
             </CardContent>
           </Card>
 
-          {/* Right column */}
           <div className="space-y-4">
-            {/* Next period */}
             {currentPeriod && (
               <Card className="border-primary-200 bg-primary-50">
                 <CardContent className="p-4">
@@ -109,50 +102,48 @@ export default function TeacherDashboard() {
                   </p>
                   <p className="text-base font-semibold text-neutral-900">{currentPeriod.subject}</p>
                   <p className="text-sm text-neutral-600">{currentPeriod.class}</p>
-                  <p className="text-xs text-neutral-500 mt-1">Room {currentPeriod.room} · {currentPeriod.time}</p>
-                  <Button size="sm" className="mt-3 w-full" asChild>
-                    <a href="/teacher/attendance">Mark Attendance</a>
+                  <p className="text-xs text-neutral-500 mt-1">Room {currentPeriod.room} - {currentPeriod.time}</p>
+                  <Button size="sm" className="mt-3 w-full" onClick={() => { window.location.href = "/teacher/attendance"; }}>
+                    Mark Attendance
                   </Button>
                 </CardContent>
               </Card>
             )}
 
-            {/* Messages */}
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle>Parent Messages</CardTitle>
-                </CardHeader>
-                <CardContent className="p-0">
-                  {recentMessages.map((msg) => (
-                    <div
+              </CardHeader>
+              <CardContent className="p-0">
+                {recentMessages.map((msg) => (
+                  <div
                     key={msg.id}
                     className={`px-4 py-3 border-b border-neutral-50 last:border-0 ${
                       msg.unread ? "bg-primary-50/50" : ""
                     }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="text-xs font-semibold text-neutral-700 leading-tight">{msg.from}</p>
-                        <span className="text-xs text-neutral-400 whitespace-nowrap">{msg.time}</span>
-                        </div>
-                        <p className="text-xs text-neutral-500 mt-0.5 truncate">{msg.body}</p>
-                        </div>
-                      ))}
-                      <div className="p-4">
-                        <Button size="sm" variant="outline" className="w-full" asChild>
-                          <a href="/teacher/messages">View All Messages</a>
-                          </Button>
-                          </div>
-                          </CardContent>
-                          </Card>
-                          </div>
-                          </div>
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs font-semibold text-neutral-700 leading-tight">{msg.from}</p>
+                      <span className="text-xs text-neutral-400 whitespace-nowrap">{msg.time}</span>
+                    </div>
+                    <p className="text-xs text-neutral-500 mt-0.5 truncate">{msg.body}</p>
+                  </div>
+                ))}
+                <div className="p-4">
+                  <Button size="sm" variant="outline" className="w-full" onClick={() => { window.location.href = "/teacher/messages"; }}>
+                    View All Messages
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
 
-        {/* Assignments pending marking */}
         <Card>
           <CardHeader className="flex-row items-center justify-between pb-3">
-            <CardTitle>Assignments — Pending Action</CardTitle>
-            <Button size="sm" variant="outline" asChild>
-              <a href="/teacher/assignments">All Assignments</a>
+            <CardTitle>Assignments - Pending Action</CardTitle>
+            <Button size="sm" variant="outline" onClick={() => { window.location.href = "/teacher/assignments"; }}>
+              All Assignments
             </Button>
           </CardHeader>
           <CardContent className="p-0">
@@ -184,8 +175,8 @@ export default function TeacherDashboard() {
                       </div>
                     </td>
                     <td className="px-6 py-3.5 text-right">
-                  <Button size="sm" variant="ghost" asChild>
-                        <a href={`/teacher/assignments/${a.id}`}>Mark</a>
+                      <Button size="sm" variant="ghost" onClick={() => { window.location.href = `/teacher/assignments/${a.id}`; }}>
+                        Mark
                       </Button>
                     </td>
                   </tr>
