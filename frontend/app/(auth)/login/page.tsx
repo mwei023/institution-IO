@@ -43,7 +43,7 @@ export default function LoginPage() {
   const onSubmit = async (data: LoginForm) => {
     setError(null);
     try {
-      const response = await authAPI.login(data.email, data.password);
+      const response = await authAPI.login(data.email, data.password, data.institutionSlug);
       const result = response.data?.data;
 
       if (result?.mfa_required) {
@@ -73,10 +73,9 @@ export default function LoginPage() {
         case "ACCOUNT_INACTIVE":
           setError("Your account has been deactivated. Please contact your administrator.");
           break;
-        case "INVALID_INSTITUTION":
-          setError("Institution not found. Please check the institution code.");
+        case "MISSING_INSTITUTION":
+          setError("Institution code is required. Please check and try again.");
           break;
-        default:
           setError("Something went wrong. Please try again or contact support.");
       }
     }
@@ -190,17 +189,7 @@ export default function LoginPage() {
         </div>
 
         {/* Demo credentials */}
-        <div className="px-8 pb-6">
-          <div className="rounded-md bg-neutral-50 border border-neutral-200 p-3">
-            <p className="text-xs font-medium text-neutral-600 mb-2">Demo credentials</p>
-            <div className="space-y-1 text-xs text-neutral-500">
-              <p><span className="font-medium">Principal:</span> principal@upendo.ac.ke</p>
-              <p><span className="font-medium">Teacher:</span> teacher.odhiambo@upendo.ac.ke</p>
-              <p><span className="font-medium">Parent:</span> parent.amara@gmail.com</p>
-              <p><span className="font-medium">Password:</span> Admin1234!</p>
-            </div>
-          </div>
-        </div>
+        
       </div>
 
       <p className="text-center text-xs text-neutral-400 mt-4">

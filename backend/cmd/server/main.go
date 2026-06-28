@@ -182,6 +182,9 @@ func main() {
 				r.With(auth.RequirePermission("grades:read")).Get("/grades/components",               academicsHandler.GetGradeComponents)
 				r.With(auth.RequirePermission("grades:read")).Get("/grades/entries",                  academicsHandler.GetGradebook)
 				r.With(auth.RequirePermission("grades:write")).Post("/grades/entries",                academicsHandler.SaveGrades)
+				r.With(auth.RequirePermission("grades:write")).Post("/grades/components",          academicsHandler.CreateGradeComponent)
+				r.With(auth.RequirePermission("grades:read")).Get("/grades/components",            academicsHandler.GetGradeComponents)
+				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate", academicsHandler.GenerateReportCard)
 			})
 
 			// Communications

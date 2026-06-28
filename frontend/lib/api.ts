@@ -76,8 +76,10 @@ api.interceptors.response.use(
 // ─── Typed API helpers ─────────────────────────────────────────
 
 export const authAPI = {
-  login: (email: string, password: string) =>
-    api.post("/auth/login", { email, password }),
+  login: (email: string, password: string, institutionSlug: string) =>
+    api.post("/auth/login", { email, password }, {
+      headers: { "X-Institution-Slug": institutionSlug },
+    }),
   logout: () => api.post("/auth/logout"),
   me: () => api.get("/auth/me"),
   changePassword: (currentPassword: string, newPassword: string) =>

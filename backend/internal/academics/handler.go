@@ -291,3 +291,41 @@ func (h *Handler) SaveGrades(w http.ResponseWriter, r *http.Request) {
 	}
 	response.NoContent(w)
 }
+
+// CreateGradeComponent handles POST /api/v1/academics/grades/components
+func (h *Handler) CreateGradeComponent(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+
+	var req CreateGradeComponentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+
+	component, err := h.svc.CreateGradeComponent(r.Context(), institutionID, &req)
+	if err != nil {
+		log.Error().Err(err).Msg("create grade component")
+		response.Error(w, http.StatusBadRequest, "COMPONENT_ERROR", err.Error())
+		return
+	}
+	response.Created(w, component)
+}
+
+// GenerateReportCard handles POST /api/v1/academics/report-cards/generate
+func (h *Handler) GenerateReportCard(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+
+	var req GenerateReportCardRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+
+	rc, err := h.svc.GenerateReportCard(r.Context(), institutionID, req.StudentID, req.ClassID, req.TermID)
+	if err != nil {
+		log.Error().Err(err).Msg("generate report card")
+		response.Error(w, http.StatusBadRequest, "REPORT_CARD_ERROR", err.Error())
+		return
+	}
+	response.Ok(w, rc)
+}

@@ -452,7 +452,8 @@ func (r *Repository) GetGradebook(ctx context.Context, institutionID, componentI
 }
 
 // SaveGradeEntries bulk-upserts grade entries.
-func (r *Repository) SaveGradeEntries(ctx context.Context, institutionID uuid.UUID, enteredBy uuid.UUID, entries []GradeInput) error {
+// SaveGradeEntries bulk-upserts grade entries for a single component.
+func (r *Repository) SaveGradeEntries(ctx context.Context, institutionID, componentID, enteredBy uuid.UUID, entries []GradeInput) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -467,10 +468,10 @@ func (r *Repository) SaveGradeEntries(ctx context.Context, institutionID uuid.UU
 			ON CONFLICT (institution_id, component_id, student_id)
 			DO UPDATE SET marks = EXCLUDED.marks, is_absent = EXCLUDED.is_absent,
 			              entered_by = EXCLUDED.entered_by, updated_at = NOW()`,
-			institutionID, entry.StudentID, entry.StudentID, entry.Marks, entry.IsAbsent, enteredBy,
+			institutionID, componentID, entry.StudentID, entry.Marks, entry.IsAbsent, enteredBy,
 		)
 		if err != nil {
-			return fmt.Errorf("upsert grade entry: %w", err)
+			return fmt.Errorf("upsert grade entry for student %s: %w", entry.StudentID, err)
 		}
 	}
 	return tx.Commit(ctx)
@@ -549,4 +550,207 @@ func (r *Repository) GetActiveStudentIDsForClass(ctx context.Context, institutio
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// CreateGradeComponent inserts a new assessment component (e.g. "CAT 1", "Midterm").
+func (r *Repository) CreateGradeComponent(ctx context.Context, institutionID uuid.UUID, req *CreateGradeComponentRequest) (*GradeComponent, error) {
+	gc := &GradeComponent{
+		ID:            uuid.New(),
+		InstitutionID: institutionID,
+		ClassID:       req.ClassID,
+		SubjectID:     req.SubjectID,
+		TermID:        req.TermID,
+		Name:          req.Name,
+		Weight:        req.Weight,
+		MaxMarks:      req.MaxMarks,
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO grade_components
+			(id, institution_id, class_id, subject_id, term_id, name, weight, max_marks, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())`,
+		gc.ID, gc.InstitutionID, gc.ClassID, gc.SubjectID, gc.TermID,
+		gc.Name, gc.Weight, gc.MaxMarks,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create grade component: %w", err)
+	}
+	return gc, nil
+}
+
+// SubjectScore is one subject's weighted percentage for a student/term.
+type SubjectScore struct {
+	SubjectID   uuid.UUID `json:"subject_id"`
+	SubjectName string    `json:"subject_name"`
+	Percentage  float64   `json:"percentage"`
+}
+
+// GetSubjectScoresForStudent computes each subject's weighted percentage
+// for a student in a term, based on real grade_entries and grade_components.
+func (r *Repository) GetSubjectScoresForStudent(ctx context.Context, institutionID, studentID, termID uuid.UUID) ([]*SubjectScore, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT
+			sub.id,
+			sub.name,
+			ROUND(SUM((ge.marks / gc.max_marks) * gc.weight) / SUM(gc.weight) * 100, 2) AS percentage
+		FROM grade_entries ge
+		JOIN grade_components gc ON gc.id = ge.component_id
+		JOIN subjects sub ON sub.id = gc.subject_id
+		WHERE gc.institution_id = $1
+		  AND gc.term_id = $2
+		  AND ge.student_id = $3
+		  AND ge.is_absent = false
+		GROUP BY sub.id, sub.name
+		ORDER BY sub.name`,
+		institutionID, termID, studentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get subject scores: %w", err)
+	}
+	defer rows.Close()
+
+	var scores []*SubjectScore
+	for rows.Next() {
+		var s SubjectScore
+		if err := rows.Scan(&s.SubjectID, &s.SubjectName, &s.Percentage); err != nil {
+			return nil, err
+		}
+		scores = append(scores, &s)
+	}
+	return scores, rows.Err()
+}
+
+// GetAggregateMarksForStudent computes the term aggregate as the simple
+// average of each subject's weighted percentage. Each subject contributes
+// equally regardless of its internal component count, since percentages
+// are already normalized to a 0-100 scale per subject.
+func (r *Repository) GetAggregateMarksForStudent(ctx context.Context, institutionID, studentID, termID uuid.UUID) (float64, int, error) {
+	var aggregate float64
+	var subjectCount int
+	err := r.db.QueryRow(ctx, `
+		SELECT ROUND(AVG(percentage), 2), COUNT(*)
+		FROM (
+			SELECT
+				ROUND(SUM((ge.marks / gc.max_marks) * gc.weight) / SUM(gc.weight) * 100, 2) AS percentage
+			FROM grade_entries ge
+			JOIN grade_components gc ON gc.id = ge.component_id
+			WHERE gc.institution_id = $1
+			  AND gc.term_id = $2
+			  AND ge.student_id = $3
+			  AND ge.is_absent = false
+			GROUP BY gc.subject_id
+		) per_subject`,
+		institutionID, termID, studentID,
+	).Scan(&aggregate, &subjectCount)
+	if err != nil {
+		return 0, 0, fmt.Errorf("compute aggregate marks: %w", err)
+	}
+	
+	return aggregate, subjectCount, nil
+}
+
+// StudentRank holds a student's aggregate and computed rank within a class or stream.
+type StudentRank struct {
+	StudentID uuid.UUID
+	Aggregate float64
+	Rank      int
+}
+
+// GetClassRankings computes aggregate marks and rank position for every
+// active student in a class for a given term, ordered best-to-worst.
+func (r *Repository) GetClassRankings(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*StudentRank, error) {
+	rows, err := r.db.Query(ctx, `
+		WITH subject_percentages AS (
+			SELECT
+				ge.student_id,
+				gc.subject_id,
+				SUM((ge.marks / gc.max_marks) * gc.weight) / SUM(gc.weight) * 100 AS percentage
+			FROM grade_entries ge
+			JOIN grade_components gc ON gc.id = ge.component_id
+			JOIN students s ON s.id = ge.student_id
+			WHERE gc.institution_id = $1
+			  AND gc.term_id = $2
+			  AND s.current_class_id = $3
+			  AND s.deleted_at IS NULL
+			  AND ge.is_absent = false
+			GROUP BY ge.student_id, gc.subject_id
+		),
+		student_aggregates AS (
+			SELECT student_id, ROUND(AVG(percentage), 2) AS aggregate
+			FROM subject_percentages
+			GROUP BY student_id
+		)
+		SELECT student_id, aggregate,
+		       RANK() OVER (ORDER BY aggregate DESC) AS class_rank
+		FROM student_aggregates
+		ORDER BY aggregate DESC`,
+		institutionID, termID, classID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("compute class rankings: %w", err)
+	}
+	defer rows.Close()
+
+	var rankings []*StudentRank
+	for rows.Next() {
+		var sr StudentRank
+		if err := rows.Scan(&sr.StudentID, &sr.Aggregate, &sr.Rank); err != nil {
+			return nil, err
+		}
+		rankings = append(rankings, &sr)
+	}
+	return rankings, rows.Err()
+}
+
+// GetTermDates returns a term's start and end dates.
+func (r *Repository) GetTermDates(ctx context.Context, institutionID, termID uuid.UUID) (time.Time, time.Time, error) {
+	var start, end time.Time
+	err := r.db.QueryRow(ctx, `
+		SELECT start_date, end_date FROM terms
+		WHERE institution_id = $1 AND id = $2`,
+		institutionID, termID,
+	).Scan(&start, &end)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("get term dates: %w", err)
+	}
+	return start, end, nil
+}
+
+// UpsertReportCard creates or updates a student's report card for a term.
+// Uses the table's existing UNIQUE(institution_id, student_id, term_id)
+// constraint to safely re-generate a report without creating duplicates.
+func (r *Repository) UpsertReportCard(ctx context.Context, institutionID, classID, termID uuid.UUID, rc *ReportCard) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO report_cards (
+			id, institution_id, student_id, class_id, term_id,
+			aggregate_marks, grade_points, class_position, stream_position,
+			attendance_days_present, attendance_days_total,
+			teacher_comment, principal_comment, status,
+			created_at, updated_at
+		) VALUES (
+			gen_random_uuid(), $1, $2, $3, $4,
+			$5, $6, $7, $8,
+			$9, $10,
+			$11, $12, $13,
+			NOW(), NOW()
+		)
+		ON CONFLICT (institution_id, student_id, term_id)
+		DO UPDATE SET
+			class_id = EXCLUDED.class_id,
+			aggregate_marks = EXCLUDED.aggregate_marks,
+			grade_points = EXCLUDED.grade_points,
+			class_position = EXCLUDED.class_position,
+			stream_position = EXCLUDED.stream_position,
+			attendance_days_present = EXCLUDED.attendance_days_present,
+			attendance_days_total = EXCLUDED.attendance_days_total,
+			status = EXCLUDED.status,
+			updated_at = NOW()`,
+		institutionID, rc.StudentID, classID, termID,
+		rc.AggregateMarks, rc.GradePoints, rc.ClassPosition, rc.StreamPosition,
+		rc.AttendanceDaysPresent, rc.AttendanceDaysTotal,
+		rc.TeacherComment, rc.PrincipalComment, rc.Status,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert report card: %w", err)
+	}
+	return nil
 }

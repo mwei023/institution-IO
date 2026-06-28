@@ -174,3 +174,20 @@ type ClassFilter struct {
 	Page           int
 	PageSize       int
 }
+
+// CreateGradeComponentRequest is the body to define a new assessment component.
+type CreateGradeComponentRequest struct {
+	ClassID   uuid.UUID `json:"class_id" validate:"required"`
+	SubjectID uuid.UUID `json:"subject_id" validate:"required"`
+	TermID    uuid.UUID `json:"term_id" validate:"required"`
+	Name      string    `json:"name" validate:"required"`
+	Weight    float64   `json:"weight" validate:"required,gt=0,lte=100"`
+	MaxMarks  float64   `json:"max_marks" validate:"required,gt=0"`
+}
+
+// GenerateReportCardRequest is the body to trigger report card generation.
+type GenerateReportCardRequest struct {
+	StudentID uuid.UUID `json:"student_id" validate:"required"`
+	ClassID   uuid.UUID `json:"class_id" validate:"required"`
+	TermID    uuid.UUID `json:"term_id" validate:"required"`
+}

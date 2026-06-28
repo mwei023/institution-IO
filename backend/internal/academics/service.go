@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"time"
 
+	"institution-os/pkg/events"
+
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"institution-os/pkg/events"
 )
 
 // Service implements all academics domain business logic.
@@ -103,7 +104,6 @@ func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID
 	return session, nil
 }
 
-
 // SubmitAttendance saves attendance records and locks the session.
 // SubmitAttendance saves attendance records and locks the session.
 func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID uuid.UUID, req *TakeAttendanceRequest) (*AttendanceSession, error) {
@@ -193,5 +193,118 @@ func (s *Service) SaveGrades(ctx context.Context, institutionID, teacherID uuid.
 	if len(req.Entries) == 0 {
 		return fmt.Errorf("no entries provided")
 	}
-	return s.repo.SaveGradeEntries(ctx, institutionID, teacherID, req.Entries)
+	return s.repo.SaveGradeEntries(ctx, institutionID, req.ComponentID, teacherID, req.Entries)
+}
+
+// CreateGradeComponent defines a new assessment component for a class/subject/term.
+func (s *Service) CreateGradeComponent(ctx context.Context, institutionID uuid.UUID, req *CreateGradeComponentRequest) (*GradeComponent, error) {
+	if req.Weight <= 0 || req.Weight > 100 {
+		return nil, fmt.Errorf("weight must be between 1 and 100")
+	}
+	if req.MaxMarks <= 0 {
+		return nil, fmt.Errorf("max_marks must be greater than 0")
+	}
+	return s.repo.CreateGradeComponent(ctx, institutionID, req)
+}
+
+// GenerateReportCard computes and saves a report card for a single student,
+func (s *Service) GenerateReportCard(ctx context.Context, institutionID, studentID, classID, termID uuid.UUID) (*ReportCard, error) {
+	aggregate, subjectCount, err := s.repo.GetAggregateMarksForStudent(ctx, institutionID, studentID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get aggregate marks: %w", err)
+	}
+	if subjectCount == 0 {
+		return nil, fmt.Errorf("no graded subjects found for this student in this term")
+	}
+
+	rankings, err := s.repo.GetClassRankings(ctx, institutionID, classID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get class rankings: %w", err)
+	}
+
+	var classPosition *int
+	for _, r := range rankings {
+		if r.StudentID == studentID {
+			pos := r.Rank
+			classPosition = &pos
+			break
+		}
+	}
+
+	// Use the term's actual real start/end dates, not an open-ended range,
+	// so attendance from other terms is never counted against this report.
+	termStart, termEnd, err := s.repo.GetTermDates(ctx, institutionID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get term dates: %w", err)
+	}
+
+	attendance, err := s.repo.GetAttendanceSummary(ctx, institutionID, classID, termStart, termEnd)
+	if err != nil {
+		return nil, fmt.Errorf("get attendance summary: %w", err)
+	}
+	var present, total int
+	for _, a := range attendance {
+		if a.StudentID == studentID {
+			present = a.Present + a.Late
+			total = a.Total
+			break
+		}
+	}
+
+	_, gradePoints := gradeFromPercentage(aggregate)
+
+	rc := &ReportCard{
+		StudentID:             studentID,
+		AggregateMarks:        aggregate,
+		GradePoints:           gradePoints,
+		ClassPosition:         classPosition,
+		AttendanceDaysPresent: present,
+		AttendanceDaysTotal:   total,
+		Status:                "draft",
+	}
+
+	if err := s.repo.UpsertReportCard(ctx, institutionID, classID, termID, rc); err != nil {
+		return nil, fmt.Errorf("save report card: %w", err)
+	}
+
+	return rc, nil
+}
+
+// gradeScale maps the standard KNEC-style percentage scale to letter
+// grades and points, used for termly internal assessment reporting.
+// NOTE: the official November KCSE exam uses examiner-set boundaries
+// that vary by subject and year — this fixed scale is the conventional
+// approximation used for internal school report cards, and is the
+// Phase 1 default. Should become a per-institution configurable table
+// in a future phase, the same way M-Pesa allocation policy was deferred.
+type gradeBand struct {
+	min    float64
+	letter string
+	points float64
+}
+
+var gradeScale = []gradeBand{
+	{80, "A", 12},
+	{75, "A-", 11},
+	{70, "B+", 10},
+	{65, "B", 9},
+	{60, "B-", 8},
+	{55, "C+", 7},
+	{50, "C", 6},
+	{45, "C-", 5},
+	{40, "D+", 4},
+	{35, "D", 3},
+	{30, "D-", 2},
+	{0, "E", 1},
+}
+
+// gradeFromPercentage converts a percentage score into its letter grade
+// and point value, using the Phase 1 default scale.
+func gradeFromPercentage(pct float64) (letter string, points float64) {
+	for _, band := range gradeScale {
+		if pct >= band.min {
+			return band.letter, band.points
+		}
+	}
+	return "E", 1
 }
