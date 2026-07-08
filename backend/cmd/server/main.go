@@ -175,6 +175,7 @@ func main() {
 				r.With(auth.RequirePermission("attendance:read")).Get("/classes/{id}",                academicsHandler.GetClass)
 				r.With(auth.RequirePermission("attendance:read")).Get("/classes/{id}/timetable",      academicsHandler.GetClassTimetable)
 				r.With(auth.RequirePermission("attendance:read")).Get("/subjects",                    academicsHandler.ListSubjects)
+				r.With(auth.RequirePermission("attendance:read")).Get("/terms",                       academicsHandler.ListTerms)  
 				r.With(auth.RequirePermission("attendance:read")).Get("/my-timetable",                academicsHandler.GetMyTimetable)
 				r.With(auth.RequirePermission("attendance:read")).Get("/attendance/sheet",             academicsHandler.GetAttendanceSheet)
 				r.With(auth.RequirePermission("attendance:write")).Post("/attendance",                 academicsHandler.SubmitAttendance)
@@ -187,6 +188,7 @@ func main() {
 				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate-class", academicsHandler.GenerateReportCardsForClass)
 				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/publish",      academicsHandler.PublishReportCard)
 				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/unpublish",    academicsHandler.UnpublishReportCard)
+				r.With(auth.RequirePermission("attendance:read")).Get("/terms",                     academicsHandler.ListTerms)
 				
 			})
 

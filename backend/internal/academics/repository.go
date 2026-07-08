@@ -422,9 +422,14 @@ func (r *Repository) ListGradeComponents(ctx context.Context, institutionID, cla
 // GetGradebook returns all grade entries for a class/subject/term/component.
 func (r *Repository) GetGradebook(ctx context.Context, institutionID, componentID uuid.UUID) ([]*GradeEntry, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT ge.id, ge.component_id, ge.student_id,
+		SELECT s.id,
+		       $2::uuid,
+		       s.id,
 		       s.first_name || ' ' || s.last_name,
-		       ge.marks, ge.is_absent, ge.entered_by, ge.updated_at
+		       ge.marks, 
+		       COALESCE(ge.is_absent, false),
+		       ge.entered_by,
+		       COALESCE(ge.updated_at, NOW())
 		FROM students s
 		LEFT JOIN grade_entries ge ON ge.student_id = s.id AND ge.component_id = $2
 		JOIN grade_components gc ON gc.id = $2
@@ -1051,4 +1056,41 @@ func (r *Repository) GetPublishedReportCardForStudent(ctx context.Context, insti
 		return nil, fmt.Errorf("get published report card: %w", err)
 	}
 	return &rc, nil
+}
+
+// Term is a school term with its dates and current status.
+type Term struct {
+	ID            uuid.UUID `json:"id"`
+	InstitutionID uuid.UUID `json:"institution_id"`
+	Name          string    `json:"name"`
+	StartDate     time.Time `json:"start_date"`
+	EndDate       time.Time `json:"end_date"`
+	IsCurrent     bool      `json:"is_current"`
+}
+
+// ListTerms returns all terms for an institution, ordered most recent first.
+func (r *Repository) ListTerms(ctx context.Context, institutionID uuid.UUID) ([]*Term, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, institution_id, name, start_date, end_date, is_current
+		FROM terms
+		WHERE institution_id = $1
+		ORDER BY start_date DESC`,
+		institutionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list terms: %w", err)
+	}
+	defer rows.Close()
+
+	var terms []*Term
+	for rows.Next() {
+		var t Term
+		if err := rows.Scan(
+			&t.ID, &t.InstitutionID, &t.Name, &t.StartDate, &t.EndDate, &t.IsCurrent,
+		); err != nil {
+			return nil, err
+		}
+		terms = append(terms, &t)
+	}
+	return terms, rows.Err()
 }

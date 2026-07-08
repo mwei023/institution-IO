@@ -169,6 +169,8 @@ export const academicsAPI = {
     api.post("/academics/report-cards/publish", data),
   unpublishReportCard: (data: { student_id: string; term_id: string }) =>
     api.post("/academics/report-cards/unpublish", data),
+
+listTerms: () => api.get("/academics/terms"),
 };
 
 export const parentAPI = {

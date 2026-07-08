@@ -27,6 +27,7 @@ const allNavItems: NavItem[] = [
   { label: "Students",       href: "/students",        icon: Users,          permission: "students:read" },
   { label: "Admissions",     href: "/admissions",      icon: UserCheck,      permission: "students:write" },
   { label: "Academics",      href: "/academics",       icon: BookOpen,       permission: "attendance:read" },
+  { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write" },
   { label: "Finance",        href: "/finance",         icon: DollarSign,     permission: "fees:read" },
   { label: "Staff",          href: "/staff",           icon: GraduationCap,  permission: "staff:read" },
   { label: "Communications", href: "/communications",  icon: MessageSquare,  permission: "announcements:read" },
@@ -51,6 +52,7 @@ const teacherNavItems: NavItem[] = [
   { label: "Dashboard",    href: "/teacher",            icon: LayoutDashboard },
   { label: "Attendance",   href: "/teacher/attendance", icon: UserCheck },
   { label: "Grades",       href: "/teacher/grades",     icon: BookOpen },
+  { label: "Report Cards", href: "/academics/report-cards", icon: FileText },
   { label: "Assignments",  href: "/teacher/assignments",icon: FileText },
   { label: "Messages",     href: "/teacher/messages",   icon: MessageSquare },
 ];

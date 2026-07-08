@@ -448,3 +448,15 @@ func (h *Handler) GetChildSubjectScores(w http.ResponseWriter, r *http.Request) 
 	}
 	response.Ok(w, scores)
 }
+
+// ListTerms handles GET /api/v1/academics/terms
+func (h *Handler) ListTerms(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	terms, err := h.svc.ListTerms(r.Context(), institutionID)
+	if err != nil {
+		log.Error().Err(err).Msg("list terms")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, terms)
+}

@@ -162,3 +162,18 @@ Kioni Waweru (seed test student) has 3 fee_payments rows from pre-payment_alloca
             </div>
           </div>
         </div>
+
+
+
+
+
+
+        you did some shit bwoy:
+        //Just remember to revert before going to production:
+sql-- Run before any real school uses the system
+UPDATE terms SET is_current = false 
+WHERE institution_id = '11111111-1111-1111-1111-111111111111';
+
+UPDATE terms SET is_current = true 
+WHERE institution_id = '11111111-1111-1111-1111-111111111111'
+  AND id = 'cc000001-0000-0000-0000-000000000002';

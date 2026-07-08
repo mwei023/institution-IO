@@ -294,3 +294,8 @@ func (s *Service) GetChildSubjectScores(ctx context.Context, institutionID, stud
 	}
 	return s.repo.GetSubjectScoresForStudent(ctx, institutionID, studentID, *termID)
 }
+
+// ListTerms returns all terms for an institution.
+func (s *Service) ListTerms(ctx context.Context, institutionID uuid.UUID) ([]*Term, error) {
+	return s.repo.ListTerms(ctx, institutionID)
+}
