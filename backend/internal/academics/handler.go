@@ -323,9 +323,128 @@ func (h *Handler) GenerateReportCard(w http.ResponseWriter, r *http.Request) {
 
 	rc, err := h.svc.GenerateReportCard(r.Context(), institutionID, req.StudentID, req.ClassID, req.TermID)
 	if err != nil {
-		log.Error().Err(err).Msg("generate report card")
-		response.Error(w, http.StatusBadRequest, "REPORT_CARD_ERROR", err.Error())
+		switch {
+		case errors.Is(err, ErrReportCardPublished):
+			response.Conflict(w, "This report card has already been published. Unpublish it first to regenerate.")
+		default:
+			log.Error().Err(err).Msg("generate report card")
+			response.Error(w, http.StatusBadRequest, "REPORT_CARD_ERROR", err.Error())
+		}
 		return
 	}
 	response.Ok(w, rc)
+}
+
+// UnpublishReportCard handles POST /api/v1/academics/report-cards/unpublish
+func (h *Handler) UnpublishReportCard(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+
+	var req PublishReportCardRequest // same shape: student_id + term_id
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+
+	rc, err := h.svc.UnpublishReportCard(r.Context(), institutionID, req.StudentID, req.TermID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrReportCardNotFound):
+			response.NotFound(w, "REPORT_CARD")
+		default:
+			log.Error().Err(err).Msg("unpublish report card")
+			response.InternalError(w)
+		}
+		return
+	}
+	response.Ok(w, rc)
+}
+
+// GenerateReportCardsForClass handles POST /api/v1/academics/report-cards/generate-class
+func (h *Handler) GenerateReportCardsForClass(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+
+	var req GenerateReportCardsForClassRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+
+	result, err := h.svc.GenerateReportCardsForClass(r.Context(), institutionID, req.ClassID, req.TermID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrClassNotFound):
+			response.NotFound(w, "CLASS")
+		default:
+			log.Error().Err(err).Msg("generate report cards for class")
+			response.Error(w, http.StatusBadRequest, "REPORT_CARD_ERROR", err.Error())
+		}
+		return
+	}
+	// 200, not 201 — this is a bulk compute/upsert that may partially
+	// succeed, not the creation of a single resource.
+	response.Ok(w, result)
+}
+
+// PublishReportCard handles POST /api/v1/academics/report-cards/publish
+func (h *Handler) PublishReportCard(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+
+	var req PublishReportCardRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+
+	rc, err := h.svc.PublishReportCard(r.Context(), institutionID, req.StudentID, req.TermID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrReportCardNotFound):
+			response.NotFound(w, "REPORT_CARD")
+		default:
+			log.Error().Err(err).Msg("publish report card")
+			response.InternalError(w)
+		}
+		return
+	}
+	response.Ok(w, rc)
+}
+
+// GetChildReportCard handles GET /api/v1/parent/children/{id}/report-card
+func (h *Handler) GetChildReportCard(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
+		return
+	}
+
+	rc, err := h.svc.GetChildReportCard(r.Context(), institutionID, studentID)
+	if err != nil {
+		if errors.Is(err, ErrReportCardNotFound) {
+			response.Ok(w, nil) // no published card yet — not an error for the parent
+			return
+		}
+		log.Error().Err(err).Msg("get child report card")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, rc)
+}
+
+// GetChildSubjectScores handles GET /api/v1/parent/children/{id}/subject-scores
+func (h *Handler) GetChildSubjectScores(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
+		return
+	}
+
+	scores, err := h.svc.GetChildSubjectScores(r.Context(), institutionID, studentID)
+	if err != nil {
+		log.Error().Err(err).Msg("get child subject scores")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, scores)
 }

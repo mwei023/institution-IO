@@ -224,3 +224,8 @@ func (s *Service) GetStudentTimeline(ctx context.Context, institutionID, student
 func (s *Service) GetStudentParents(ctx context.Context, institutionID, studentID uuid.UUID) ([]*ParentGuardian, error) {
 	return s.repo.GetStudentParents(ctx, institutionID, studentID)
 }
+
+// GetMyChildren returns all students linked to the logged-in parent user.
+func (s *Service) GetMyChildren(ctx context.Context, institutionID, parentUserID uuid.UUID) ([]*ChildSummary, error) {
+	return s.repo.GetChildrenForParent(ctx, institutionID, parentUserID)
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"institution-os/pkg/db"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log" 
 )
 
 var (
@@ -16,6 +17,8 @@ var (
 	ErrSubjectNotFound = errors.New("subject not found")
 	ErrSessionNotFound = errors.New("attendance session not found")
 	ErrSessionLocked   = errors.New("attendance session is locked")
+	ErrReportCardNotFound = errors.New("report card not found")
+	ErrReportCardPublished = errors.New("report card already published — unpublish before regenerating")  
 )
 
 // Repository handles database access for the academics domain.
@@ -626,20 +629,21 @@ func (r *Repository) GetSubjectScoresForStudent(ctx context.Context, institution
 func (r *Repository) GetAggregateMarksForStudent(ctx context.Context, institutionID, studentID, termID uuid.UUID) (float64, int, error) {
 	var aggregate float64
 	var subjectCount int
-	err := r.db.QueryRow(ctx, `
-		SELECT ROUND(AVG(percentage), 2), COUNT(*)
-		FROM (
-			SELECT
-				ROUND(SUM((ge.marks / gc.max_marks) * gc.weight) / SUM(gc.weight) * 100, 2) AS percentage
-			FROM grade_entries ge
-			JOIN grade_components gc ON gc.id = ge.component_id
-			WHERE gc.institution_id = $1
-			  AND gc.term_id = $2
-			  AND ge.student_id = $3
-			  AND ge.is_absent = false
-			GROUP BY gc.subject_id
-		) per_subject`,
-		institutionID, termID, studentID,
+	// AFTER:
+err := r.db.QueryRow(ctx, `
+    SELECT COALESCE(ROUND(AVG(percentage), 2), 0), COUNT(*)
+    FROM (
+        SELECT
+            ROUND(SUM((ge.marks / gc.max_marks) * gc.weight) / SUM(gc.weight) * 100, 2) AS percentage
+        FROM grade_entries ge
+        JOIN grade_components gc ON gc.id = ge.component_id
+        WHERE gc.institution_id = $1
+          AND gc.term_id = $2
+          AND ge.student_id = $3
+          AND ge.is_absent = false
+        GROUP BY gc.subject_id
+    ) per_subject`,
+    institutionID, termID, studentID,
 	).Scan(&aggregate, &subjectCount)
 	if err != nil {
 		return 0, 0, fmt.Errorf("compute aggregate marks: %w", err)
@@ -718,8 +722,17 @@ func (r *Repository) GetTermDates(ctx context.Context, institutionID, termID uui
 // UpsertReportCard creates or updates a student's report card for a term.
 // Uses the table's existing UNIQUE(institution_id, student_id, term_id)
 // constraint to safely re-generate a report without creating duplicates.
+//
+// Guard: if this student's report card for this term is already
+// published, the write is refused entirely — it does NOT silently
+// overwrite the published numbers and does NOT downgrade status back
+// to draft. A published report is something a parent may already have
+// seen; changing it invisibly on a routine bulk re-run is worse than
+// returning an error. Callers get ErrReportCardPublished and must call
+// UnpublishReportCard first if a correction is genuinely needed.
 func (r *Repository) UpsertReportCard(ctx context.Context, institutionID, classID, termID uuid.UUID, rc *ReportCard) error {
-	_, err := r.db.Exec(ctx, `
+	var id uuid.UUID
+	err := r.db.QueryRow(ctx, `
 		INSERT INTO report_cards (
 			id, institution_id, student_id, class_id, term_id,
 			aggregate_marks, grade_points, class_position, stream_position,
@@ -743,14 +756,299 @@ func (r *Repository) UpsertReportCard(ctx context.Context, institutionID, classI
 			attendance_days_present = EXCLUDED.attendance_days_present,
 			attendance_days_total = EXCLUDED.attendance_days_total,
 			status = EXCLUDED.status,
-			updated_at = NOW()`,
+			updated_at = NOW()
+		WHERE report_cards.status <> 'published'
+		RETURNING id`,
 		institutionID, rc.StudentID, classID, termID,
 		rc.AggregateMarks, rc.GradePoints, rc.ClassPosition, rc.StreamPosition,
 		rc.AttendanceDaysPresent, rc.AttendanceDaysTotal,
 		rc.TeacherComment, rc.PrincipalComment, rc.Status,
-	)
+	).Scan(&id)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// WHERE excluded the conflicting row — it exists and is published.
+			return ErrReportCardPublished
+		}
 		return fmt.Errorf("upsert report card: %w", err)
 	}
+	rc.ID = id
 	return nil
+}
+
+// UnpublishReportCard reverts a published report card back to draft and
+// clears published_at. This is the only sanctioned way to make a
+// published report editable again — a deliberate action an admin has
+// to explicitly take, rather than something that happens as a side
+// effect of re-running generation. Idempotent: unpublishing an
+// already-draft card just returns it unchanged.
+func (r *Repository) UnpublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
+	var rc ReportCard
+	err := r.db.QueryRow(ctx, `
+		UPDATE report_cards
+		SET status = 'draft', published_at = NULL, updated_at = NOW()
+		WHERE institution_id = $1 AND student_id = $2 AND term_id = $3
+		  AND status = 'published'
+		RETURNING id, student_id, aggregate_marks, grade_points, class_position,
+		          stream_position, attendance_days_present, attendance_days_total,
+		          teacher_comment, principal_comment, status, published_at`,
+		institutionID, studentID, termID,
+	).Scan(
+		&rc.ID, &rc.StudentID, &rc.AggregateMarks, &rc.GradePoints, &rc.ClassPosition,
+		&rc.StreamPosition, &rc.AttendanceDaysPresent, &rc.AttendanceDaysTotal,
+		&rc.TeacherComment, &rc.PrincipalComment, &rc.Status, &rc.PublishedAt,
+	)
+	if err == nil {
+		return &rc, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("unpublish report card: %w", err)
+	}
+	existing, ferr := r.getReportCardRaw(ctx, institutionID, studentID, termID)
+	if ferr != nil {
+		return nil, ferr
+	}
+	return existing, nil // already draft — no-op
+}
+
+// getReportCardRaw fetches a report card by its natural key. Used to
+// disambiguate "not found" from "already in target state" in the
+// idempotent publish/unpublish paths above.
+func (r *Repository) getReportCardRaw(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
+	var rc ReportCard
+	err := r.db.QueryRow(ctx, `
+		SELECT id, student_id, aggregate_marks, grade_points, class_position,
+		       stream_position, attendance_days_present, attendance_days_total,
+		       teacher_comment, principal_comment, status, published_at
+		FROM report_cards
+		WHERE institution_id = $1 AND student_id = $2 AND term_id = $3`,
+		institutionID, studentID, termID,
+	).Scan(
+		&rc.ID, &rc.StudentID, &rc.AggregateMarks, &rc.GradePoints, &rc.ClassPosition,
+		&rc.StreamPosition, &rc.AttendanceDaysPresent, &rc.AttendanceDaysTotal,
+		&rc.TeacherComment, &rc.PrincipalComment, &rc.Status, &rc.PublishedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrReportCardNotFound
+		}
+		return nil, err
+	}
+	return &rc, nil
+}
+
+// PublishReportCard transitions a report card from draft to published,
+// stamping published_at. Idempotent: publishing an already-published
+// card is a no-op that returns the existing record, so a retried or
+// double-clicked request never overwrites the original published_at.
+func (r *Repository) PublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
+	var rc ReportCard
+	err := r.db.QueryRow(ctx, `
+		UPDATE report_cards
+		SET status = 'published', published_at = NOW(), updated_at = NOW()
+		WHERE institution_id = $1 AND student_id = $2 AND term_id = $3
+		  AND status = 'draft'
+		RETURNING id, student_id, aggregate_marks, grade_points, class_position,
+		          stream_position, attendance_days_present, attendance_days_total,
+		          teacher_comment, principal_comment, status, published_at`,
+		institutionID, studentID, termID,
+	).Scan(
+		&rc.ID, &rc.StudentID, &rc.AggregateMarks, &rc.GradePoints, &rc.ClassPosition,
+		&rc.StreamPosition, &rc.AttendanceDaysPresent, &rc.AttendanceDaysTotal,
+		&rc.TeacherComment, &rc.PrincipalComment, &rc.Status, &rc.PublishedAt,
+	)
+	if err == nil {
+		return &rc, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("publish report card: %w", err)
+	}
+	existing, ferr := r.getReportCardRaw(ctx, institutionID, studentID, termID)
+	if ferr != nil {
+		return nil, ferr
+	}
+	return existing, nil // already published — idempotent return
+}
+
+
+// GenerateReportCard computes and saves a report card for a single student.
+func (s *Service) GenerateReportCard(ctx context.Context, institutionID, studentID, classID, termID uuid.UUID) (*ReportCard, error) {
+	rankings, err := s.repo.GetClassRankings(ctx, institutionID, classID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get class rankings: %w", err)
+	}
+
+	termStart, termEnd, err := s.repo.GetTermDates(ctx, institutionID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get term dates: %w", err)
+	}
+
+	attendance, err := s.repo.GetAttendanceSummary(ctx, institutionID, classID, termStart, termEnd)
+	if err != nil {
+		return nil, fmt.Errorf("get attendance summary: %w", err)
+	}
+
+	return s.generateReportCardForStudent(ctx, institutionID, studentID, classID, termID, rankings, attendance)
+}
+
+// generateReportCardForStudent computes one student's report card using
+// class-wide data (rankings, attendance) the caller already fetched.
+// GenerateReportCard fetches that data for a single call; bulk generation
+// fetches it ONCE per class and calls this directly for every student,
+// instead of re-running the rankings/attendance queries per student.
+func (s *Service) generateReportCardForStudent(
+	ctx context.Context,
+	institutionID, studentID, classID, termID uuid.UUID,
+	rankings []*StudentRank,
+	attendance []*AttendanceSummary,
+) (*ReportCard, error) {
+	aggregate, subjectCount, err := s.repo.GetAggregateMarksForStudent(ctx, institutionID, studentID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get aggregate marks: %w", err)
+	}
+	if subjectCount == 0 {
+		return nil, fmt.Errorf("no graded subjects found for this student in this term")
+	}
+
+	var classPosition *int
+	for _, r := range rankings {
+		if r.StudentID == studentID {
+			pos := r.Rank
+			classPosition = &pos
+			break
+		}
+	}
+
+	var present, total int
+	for _, a := range attendance {
+		if a.StudentID == studentID {
+			present = a.Present + a.Late
+			total = a.Total
+			break
+		}
+	}
+
+	_, gradePoints := gradeFromPercentage(aggregate)
+
+	rc := &ReportCard{
+		StudentID:             studentID,
+		AggregateMarks:        aggregate,
+		GradePoints:           gradePoints,
+		ClassPosition:         classPosition,
+		AttendanceDaysPresent: present,
+		AttendanceDaysTotal:   total,
+		Status:                "draft",
+	}
+
+	if err := s.repo.UpsertReportCard(ctx, institutionID, classID, termID, rc); err != nil {
+		return nil, fmt.Errorf("save report card: %w", err)
+	}
+
+	return rc, nil
+}
+
+// GenerateReportCardsForClass generates (or regenerates) a report card for
+// every active student in a class for the given term. Each student is
+// processed independently — one student's failure (no grades entered yet,
+// absent from every assessment, etc.) is recorded and skipped; it never
+// aborts the rest of the batch. Class rankings and attendance summaries
+// are computed once for the whole class and reused for every student.
+func (s *Service) GenerateReportCardsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) (*BulkReportCardResult, error) {
+	if _, err := s.repo.GetClassByID(ctx, institutionID, classID); err != nil {
+		return nil, err // propagates ErrClassNotFound
+	}
+
+	studentIDs, err := s.repo.GetActiveStudentIDsForClass(ctx, institutionID, classID)
+	if err != nil {
+		return nil, fmt.Errorf("get class roster: %w", err)
+	}
+
+	rankings, err := s.repo.GetClassRankings(ctx, institutionID, classID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get class rankings: %w", err)
+	}
+
+	termStart, termEnd, err := s.repo.GetTermDates(ctx, institutionID, termID)
+	if err != nil {
+		return nil, fmt.Errorf("get term dates: %w", err)
+	}
+
+	attendance, err := s.repo.GetAttendanceSummary(ctx, institutionID, classID, termStart, termEnd)
+	if err != nil {
+		return nil, fmt.Errorf("get attendance summary: %w", err)
+	}
+
+	result := &BulkReportCardResult{
+		ClassID:       classID,
+		TermID:        termID,
+		TotalStudents: len(studentIDs),
+		Succeeded:     make([]*ReportCard, 0, len(studentIDs)),
+		Failed:        make([]BulkReportCardFailure, 0),
+	}
+
+	for _, studentID := range studentIDs {
+		rc, err := s.generateReportCardForStudent(ctx, institutionID, studentID, classID, termID, rankings, attendance)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("student_id", studentID.String()).
+				Str("class_id", classID.String()).
+				Msg("skipping report card generation for student")
+			result.Failed = append(result.Failed, BulkReportCardFailure{
+				StudentID: studentID,
+				Reason:    err.Error(),
+			})
+			continue
+		}
+		result.Succeeded = append(result.Succeeded, rc)
+	}
+
+	result.SucceededCount = len(result.Succeeded)
+	result.FailedCount = len(result.Failed)
+
+	return result, nil
+}
+
+// PublishReportCard transitions a single student's report card from
+// draft to published. See Repository.PublishReportCard for idempotency
+// semantics.
+func (s *Service) PublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
+	return s.repo.PublishReportCard(ctx, institutionID, studentID, termID)
+}
+
+// GetPublishedReportCardForStudent returns the most recently published
+// report card for a student, with display fields joined in.
+// Returns ErrReportCardNotFound if no published card exists yet.
+func (r *Repository) GetPublishedReportCardForStudent(ctx context.Context, institutionID, studentID uuid.UUID) (*ReportCard, error) {
+	var rc ReportCard
+	err := r.db.QueryRow(ctx, `
+		SELECT rc.id, rc.student_id,
+		       s.first_name || ' ' || s.last_name,
+		       c.name,
+		       t.name,
+		       rc.aggregate_marks, rc.grade_points, rc.class_position,
+		       rc.stream_position, rc.attendance_days_present, rc.attendance_days_total,
+		       rc.teacher_comment, rc.principal_comment, rc.status, rc.published_at
+		FROM report_cards rc
+		JOIN students s ON s.id = rc.student_id
+		JOIN classes c ON c.id = rc.class_id
+		JOIN terms t ON t.id = rc.term_id
+		WHERE rc.institution_id = $1
+		  AND rc.student_id = $2
+		  AND rc.status = 'published'
+		ORDER BY rc.published_at DESC
+		LIMIT 1`,
+		institutionID, studentID,
+	).Scan(
+		&rc.ID, &rc.StudentID,
+		&rc.StudentName, &rc.ClassName, &rc.Term,
+		&rc.AggregateMarks, &rc.GradePoints, &rc.ClassPosition,
+		&rc.StreamPosition, &rc.AttendanceDaysPresent, &rc.AttendanceDaysTotal,
+		&rc.TeacherComment, &rc.PrincipalComment, &rc.Status, &rc.PublishedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrReportCardNotFound
+		}
+		return nil, fmt.Errorf("get published report card: %w", err)
+	}
+	return &rc, nil
 }

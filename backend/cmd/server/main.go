@@ -183,8 +183,11 @@ func main() {
 				r.With(auth.RequirePermission("grades:read")).Get("/grades/entries",                  academicsHandler.GetGradebook)
 				r.With(auth.RequirePermission("grades:write")).Post("/grades/entries",                academicsHandler.SaveGrades)
 				r.With(auth.RequirePermission("grades:write")).Post("/grades/components",          academicsHandler.CreateGradeComponent)
-				r.With(auth.RequirePermission("grades:read")).Get("/grades/components",            academicsHandler.GetGradeComponents)
-				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate", academicsHandler.GenerateReportCard)
+				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate",       academicsHandler.GenerateReportCard)
+				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate-class", academicsHandler.GenerateReportCardsForClass)
+				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/publish",      academicsHandler.PublishReportCard)
+				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/unpublish",    academicsHandler.UnpublishReportCard)
+				
 			})
 
 			// Communications
@@ -196,6 +199,16 @@ func main() {
 				r.Get("/messages/{user_id}",                                                           commHandler.GetMessages)
 				r.Post("/messages",                                                                     commHandler.SendMessage)
 			})
+
+			// Parent portal — role-gated, not permission-gated
+			r.Route("/parent", func(r chi.Router) {
+				r.Use(auth.RequireRole("parent"))
+				r.Get("/children",                          studentHandler.GetMyChildren)
+				r.Get("/children/{id}/report-card",         academicsHandler.GetChildReportCard)
+				r.Get("/children/{id}/subject-scores",      academicsHandler.GetChildSubjectScores)
+				r.Get("/children/{id}/account",             financeHandler.GetFeeAccount)
+				r.Get("/children/{id}/attendance",          academicsHandler.GetAttendanceSummary) // uses class_id query param
+})
 
 			// Digital Locker
 			r.Route("/locker", func(r chi.Router) {

@@ -141,4 +141,42 @@ export const academicsAPI = {
     api.get("/academics/attendance/summary", {
       params: { class_id: classId, start_date: startDate, end_date: endDate },
     }),
+
+  listSubjects: () => api.get("/academics/subjects"),
+  getGradeComponents: (classId: string, subjectId: string, termId: string) =>
+    api.get("/academics/grades/components", {
+      params: { class_id: classId, subject_id: subjectId, term_id: termId },
+    }),
+  getGradebook: (componentId: string) =>
+    api.get("/academics/grades/entries", { params: { component_id: componentId } }),
+  saveGrades: (data: {
+    component_id: string;
+    entries: Array<{ student_id: string; marks: number | null; is_absent: boolean }>;
+  }) => api.post("/academics/grades/entries", data),
+  createGradeComponent: (data: {
+    class_id: string;
+    subject_id: string;
+    term_id: string;
+    name: string;
+    weight: number;
+    max_marks: number;
+  }) => api.post("/academics/grades/components", data),
+  generateReportCard: (data: { student_id: string; class_id: string; term_id: string }) =>
+    api.post("/academics/report-cards/generate", data),
+  generateReportCardsForClass: (data: { class_id: string; term_id: string }) =>
+    api.post("/academics/report-cards/generate-class", data),
+  publishReportCard: (data: { student_id: string; term_id: string }) =>
+    api.post("/academics/report-cards/publish", data),
+  unpublishReportCard: (data: { student_id: string; term_id: string }) =>
+    api.post("/academics/report-cards/unpublish", data),
+};
+
+export const parentAPI = {
+  getChildren: () => api.get("/parent/children"),
+  getChildReportCard: (studentId: string) =>
+    api.get(`/parent/children/${studentId}/report-card`),
+  getChildSubjectScores: (studentId: string) =>
+    api.get(`/parent/children/${studentId}/subject-scores`),
+  getChildFeeAccount: (studentId: string) =>
+    api.get(`/parent/children/${studentId}/account`),
 };

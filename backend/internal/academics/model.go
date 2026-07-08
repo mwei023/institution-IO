@@ -191,3 +191,38 @@ type GenerateReportCardRequest struct {
 	ClassID   uuid.UUID `json:"class_id" validate:"required"`
 	TermID    uuid.UUID `json:"term_id" validate:"required"`
 }
+
+// GenerateReportCardsForClassRequest is the body to bulk-generate report
+// cards for every active student in a class.
+type GenerateReportCardsForClassRequest struct {
+	ClassID uuid.UUID `json:"class_id" validate:"required"`
+	TermID  uuid.UUID `json:"term_id" validate:"required"`
+}
+
+// BulkReportCardResult summarizes the outcome of generating report cards
+// for a whole class. Processing never aborts on the first failure — every
+// student that can succeed does, and every student that can't is recorded
+// here with a reason.
+type BulkReportCardResult struct {
+	ClassID        uuid.UUID                `json:"class_id"`
+	TermID         uuid.UUID                `json:"term_id"`
+	TotalStudents  int                      `json:"total_students"`
+	SucceededCount int                      `json:"succeeded_count"`
+	FailedCount    int                      `json:"failed_count"`
+	Succeeded      []*ReportCard            `json:"succeeded"`
+	Failed         []BulkReportCardFailure  `json:"failed"`
+}
+
+// BulkReportCardFailure records why one student's report card could not
+// be generated during a bulk run.
+type BulkReportCardFailure struct {
+	StudentID uuid.UUID `json:"student_id"`
+	Reason    string    `json:"reason"`
+}
+
+// PublishReportCardRequest is the body to publish a single student's
+// report card for a term.
+type PublishReportCardRequest struct {
+	StudentID uuid.UUID `json:"student_id" validate:"required"`
+	TermID    uuid.UUID `json:"term_id" validate:"required"`
+}

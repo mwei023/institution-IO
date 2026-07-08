@@ -351,3 +351,42 @@ func (r *Repository) GetStudentParents(ctx context.Context, institutionID, stude
 	}
 	return parents, rows.Err()
 }
+
+// GetChildrenForParent returns all active students linked to a parent user.
+func (r *Repository) GetChildrenForParent(ctx context.Context, institutionID, parentUserID uuid.UUID) ([]*ChildSummary, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT s.id,
+		       s.first_name, s.last_name,
+		       s.first_name || ' ' || s.last_name,
+		       s.admission_number,
+		       s.current_class_id,
+		       COALESCE(c.name, ''),
+		       s.status
+		FROM parent_guardians pg
+		JOIN student_parent_links spl ON spl.parent_id = pg.id
+		JOIN students s ON s.id = spl.student_id
+		LEFT JOIN classes c ON c.id = s.current_class_id
+		WHERE pg.institution_id = $1
+		  AND pg.user_id = $2
+		  AND s.deleted_at IS NULL
+		ORDER BY s.first_name`,
+		institutionID, parentUserID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get children for parent: %w", err)
+	}
+	defer rows.Close()
+
+	var children []*ChildSummary
+	for rows.Next() {
+		var ch ChildSummary
+		if err := rows.Scan(
+			&ch.ID, &ch.FirstName, &ch.LastName, &ch.FullName,
+			&ch.AdmissionNumber, &ch.CurrentClassID, &ch.ClassName, &ch.Status,
+		); err != nil {
+			return nil, err
+		}
+		children = append(children, &ch)
+	}
+	return children, rows.Err()
+}

@@ -70,17 +70,17 @@ export default function StudentsPage() {
             <h1 className="page-title">Students</h1>
             <p className="page-subtitle">{total} students {status !== "all" ? `· ${status}` : ""}</p>
           </div>
-          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
             <Button variant="outline" size="sm">
               <Download className="h-4 w-4" />
               Export
             </Button>
-            <Button size="sm" asChild>
-              <a href="/admissions/new">
+            <a href="/admissions/new">
+              <Button size="sm">
                 <Plus className="h-4 w-4" />
                 New Admission
-              </a>
-            </Button>
+              </Button>
+            </a>
           </div>
         </div>
 

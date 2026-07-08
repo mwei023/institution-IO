@@ -138,3 +138,16 @@ type TimelineEvent struct {
 	EventDate   time.Time   `json:"event_date"`
 	CreatedAt   time.Time   `json:"created_at"`
 }
+
+// ChildSummary is a parent's view of one of their linked children.
+type ChildSummary struct {
+	ID              uuid.UUID  `json:"id"`
+	FirstName       string     `json:"first_name"`
+	LastName        string     `json:"last_name"`
+	FullName        string     `json:"full_name"`
+	AdmissionNumber string     `json:"admission_number"`
+	CurrentClassID  *uuid.UUID `json:"current_class_id,omitempty"`
+	ClassName       string     `json:"class_name"`
+	Status          string     `json:"status"`
+}
+

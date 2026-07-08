@@ -245,3 +245,22 @@ func (h *Handler) GetStudentParents(w http.ResponseWriter, r *http.Request) {
 
 	response.Ok(w, parents)
 }
+
+// GetMyChildren handles GET /api/v1/parent/children
+func (h *Handler) GetMyChildren(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
+	parentUserID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+
+	children, err := h.svc.GetMyChildren(r.Context(), institutionID, parentUserID)
+	if err != nil {
+		log.Error().Err(err).Msg("get my children")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, children)
+}

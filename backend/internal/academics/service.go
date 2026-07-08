@@ -207,68 +207,28 @@ func (s *Service) CreateGradeComponent(ctx context.Context, institutionID uuid.U
 	return s.repo.CreateGradeComponent(ctx, institutionID, req)
 }
 
-// GenerateReportCard computes and saves a report card for a single student,
-func (s *Service) GenerateReportCard(ctx context.Context, institutionID, studentID, classID, termID uuid.UUID) (*ReportCard, error) {
-	aggregate, subjectCount, err := s.repo.GetAggregateMarksForStudent(ctx, institutionID, studentID, termID)
-	if err != nil {
-		return nil, fmt.Errorf("get aggregate marks: %w", err)
-	}
-	if subjectCount == 0 {
-		return nil, fmt.Errorf("no graded subjects found for this student in this term")
-	}
+//* GenerateReportCard computes and saves a report card for a single student.
 
-	rankings, err := s.repo.GetClassRankings(ctx, institutionID, classID, termID)
-	if err != nil {
-		return nil, fmt.Errorf("get class rankings: %w", err)
-	}
 
-	var classPosition *int
-	for _, r := range rankings {
-		if r.StudentID == studentID {
-			pos := r.Rank
-			classPosition = &pos
-			break
-		}
-	}
+// generateReportCardForStudent computes one student's report card using
+// class-wide data (rankings, attendance) the caller already fetched.
+// GenerateReportCard fetches that data for a single call; bulk generation
+// fetches it ONCE per class and calls this directly for every student,
+// instead of re-running the rankings/attendance queries per student.
 
-	// Use the term's actual real start/end dates, not an open-ended range,
-	// so attendance from other terms is never counted against this report.
-	termStart, termEnd, err := s.repo.GetTermDates(ctx, institutionID, termID)
-	if err != nil {
-		return nil, fmt.Errorf("get term dates: %w", err)
-	}
 
-	attendance, err := s.repo.GetAttendanceSummary(ctx, institutionID, classID, termStart, termEnd)
-	if err != nil {
-		return nil, fmt.Errorf("get attendance summary: %w", err)
-	}
-	var present, total int
-	for _, a := range attendance {
-		if a.StudentID == studentID {
-			present = a.Present + a.Late
-			total = a.Total
-			break
-		}
-	}
+// GenerateReportCardsForClass generates (or regenerates) a report card for
+// every active student in a class for the given term. Each student is
+// processed independently — one student's failure is recorded and skipped;
+// it never aborts the rest of the batch. Rankings and attendance are
+// computed once for the whole class and reused for every student.
 
-	_, gradePoints := gradeFromPercentage(aggregate)
 
-	rc := &ReportCard{
-		StudentID:             studentID,
-		AggregateMarks:        aggregate,
-		GradePoints:           gradePoints,
-		ClassPosition:         classPosition,
-		AttendanceDaysPresent: present,
-		AttendanceDaysTotal:   total,
-		Status:                "draft",
-	}
+// PublishReportCard transitions a single student's report card from
+// draft to published. See Repository.PublishReportCard for idempotency
+// semantics.
 
-	if err := s.repo.UpsertReportCard(ctx, institutionID, classID, termID, rc); err != nil {
-		return nil, fmt.Errorf("save report card: %w", err)
-	}
 
-	return rc, nil
-}
 
 // gradeScale maps the standard KNEC-style percentage scale to letter
 // grades and points, used for termly internal assessment reporting.
@@ -307,4 +267,30 @@ func gradeFromPercentage(pct float64) (letter string, points float64) {
 		}
 	}
 	return "E", 1
+}
+
+// UnpublishReportCard reverts a published report card to draft so it
+// can be corrected and republished. See Repository.UnpublishReportCard
+// for idempotency semantics.
+func (s *Service) UnpublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
+	return s.repo.UnpublishReportCard(ctx, institutionID, studentID, termID)
+}
+
+// GetChildReportCard returns the most recently published report card
+// for a student, intended for parent-portal consumption.
+func (s *Service) GetChildReportCard(ctx context.Context, institutionID, studentID uuid.UUID) (*ReportCard, error) {
+	return s.repo.GetPublishedReportCardForStudent(ctx, institutionID, studentID)
+}
+
+// GetChildSubjectScores returns per-subject scores for the current term,
+// for display on the parent-facing report card detail page.
+func (s *Service) GetChildSubjectScores(ctx context.Context, institutionID, studentID uuid.UUID) ([]*SubjectScore, error) {
+	termID, err := s.repo.GetCurrentTerm(ctx, institutionID)
+	if err != nil {
+		return nil, err
+	}
+	if termID == nil {
+		return []*SubjectScore{}, nil
+	}
+	return s.repo.GetSubjectScoresForStudent(ctx, institutionID, studentID, *termID)
 }

@@ -90,12 +90,12 @@ export default function AdmissionsPage() {
             <h1 className="page-title">Admissions</h1>
             <p className="page-subtitle">{total} applications · Academic Year 2024</p>
           </div>
-          <Button size="sm" asChild>
-            <a href="/admissions/new">
+          <a href="/admissions/new">
+            <Button size="sm">
               <Plus className="h-4 w-4" />
               New Application
-            </a>
-          </Button>
+            </Button>
+          </a>
         </div>
 
         {/* Filters */}
@@ -138,7 +138,7 @@ export default function AdmissionsPage() {
               <EmptyState
                 title="No applications found"
                 description="Admissions will appear here once submitted."
-action={
+                action={
               <Button size="sm" asChild>
                 <a href="/admissions/new">New Application</a>
               </Button>
