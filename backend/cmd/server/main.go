@@ -17,6 +17,7 @@ import (
 	"institution-os/internal/academics"
 	"institution-os/internal/audit"
 	"institution-os/internal/auth"
+	"institution-os/internal/cbc"
 	"institution-os/internal/communication"
 	digitalocker "institution-os/internal/digital_locker"
 	"institution-os/internal/finance"
@@ -25,7 +26,7 @@ import (
 	"institution-os/internal/student"
 	"institution-os/pkg/config"
 	"institution-os/pkg/db"
-	
+
 	pkglogger "institution-os/pkg/logger"
 )
 
@@ -51,7 +52,7 @@ func main() {
 	defer dbPool.Close()
 	log.Info().Msg("database connected")
 
-// ── Services ──────────────────────────────────────────────────
+	// ── Services ──────────────────────────────────────────────────
 	auditSvc := audit.NewService(dbPool)
 	notificationSvc := notification.NewService()
 
@@ -76,6 +77,13 @@ func main() {
 	academicsRepo := academics.NewRepository(dbPool)
 	academicsSvc := academics.NewService(academicsRepo, publisher)
 
+	// CBC v1.0 academic layer — deliberately separate service/handler
+	// from academics, but depends on academicsRepo directly for
+	// attendance/class data, which is curriculum-agnostic and already
+	// correct there (see cbc/service.go doc comment for the rationale).
+	cbcRepo := cbc.NewRepository(dbPool)
+	cbcSvc := cbc.NewService(cbcRepo, academicsRepo, publisher)
+
 	commRepo := communication.NewRepository(dbPool)
 	commSvc := communication.NewService(commRepo, publisher)
 
@@ -92,11 +100,12 @@ func main() {
 	}
 
 	// ── Handlers ──────────────────────────────────────────────────
-	authHandler       := auth.NewHandler(authSvc)
-	studentHandler    := student.NewHandler(studentSvc)
-	financeHandler    := finance.NewHandler(financeSvc)
-	academicsHandler  := academics.NewHandler(academicsSvc)
-	commHandler       := communication.NewHandler(commSvc)
+	authHandler      := auth.NewHandler(authSvc)
+	studentHandler   := student.NewHandler(studentSvc)
+	financeHandler   := finance.NewHandler(financeSvc)
+	academicsHandler := academics.NewHandler(academicsSvc)
+	cbcHandler       := cbc.NewHandler(cbcSvc)
+	commHandler      := communication.NewHandler(commSvc)
 	var lockerHandler *digitalocker.Handler
 	if lockerSvc != nil {
 		lockerHandler = digitalocker.NewHandler(lockerSvc)
@@ -129,10 +138,10 @@ func main() {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public auth
-		r.Post("/auth/login",        authHandler.Login)
-		r.Post("/auth/mfa/verify",   authHandler.VerifyMFA)
-		r.Post("/auth/refresh",      authHandler.RefreshToken)
-		r.Post("/auth/logout",       authHandler.Logout)
+		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/mfa/verify", authHandler.VerifyMFA)
+		r.Post("/auth/refresh", authHandler.RefreshToken)
+		r.Post("/auth/logout", authHandler.Logout)
 
 		// Protected
 		r.Group(func(r chi.Router) {
@@ -140,77 +149,98 @@ func main() {
 			r.Use(audit.HTTPMiddleware(auditSvc))
 
 			// Auth
-			r.Get("/auth/me",                        authHandler.Me)
-			r.Post("/auth/change-password",           authHandler.ChangePassword)
+			r.Get("/auth/me", authHandler.Me)
+			r.Post("/auth/change-password", authHandler.ChangePassword)
 
 			// Admissions & Students
 			r.Route("/admissions", func(r chi.Router) {
-				r.With(auth.RequirePermission("students:write")).Post("/",             studentHandler.CreateAdmission)
-				r.With(auth.RequirePermission("students:read")).Get("/",               studentHandler.ListAdmissions)
-				r.With(auth.RequirePermission("students:read")).Get("/{id}",           studentHandler.GetAdmission)
-				r.With(auth.RequirePermission("students:write")).Post("/{id}/review",  studentHandler.ReviewAdmission)
-				r.With(auth.RequirePermission("students:write")).Post("/{id}/enroll",  studentHandler.EnrollStudent)
+				r.With(auth.RequirePermission("students:write")).Post("/", studentHandler.CreateAdmission)
+				r.With(auth.RequirePermission("students:read")).Get("/", studentHandler.ListAdmissions)
+				r.With(auth.RequirePermission("students:read")).Get("/{id}", studentHandler.GetAdmission)
+				r.With(auth.RequirePermission("students:write")).Post("/{id}/review", studentHandler.ReviewAdmission)
+				r.With(auth.RequirePermission("students:write")).Post("/{id}/enroll", studentHandler.EnrollStudent)
 			})
 
 			r.Route("/students", func(r chi.Router) {
-				r.With(auth.RequirePermission("students:read")).Get("/",               studentHandler.ListStudents)
-				r.With(auth.RequirePermission("students:read")).Get("/{id}",           studentHandler.GetStudent)
-				r.With(auth.RequirePermission("students:read")).Get("/{id}/timeline",  studentHandler.GetStudentTimeline)
-				r.With(auth.RequirePermission("students:read")).Get("/{id}/parents",   studentHandler.GetStudentParents)
+				r.With(auth.RequirePermission("students:read")).Get("/", studentHandler.ListStudents)
+				r.With(auth.RequirePermission("students:read")).Get("/{id}", studentHandler.GetStudent)
+				r.With(auth.RequirePermission("students:read")).Get("/{id}/timeline", studentHandler.GetStudentTimeline)
+				r.With(auth.RequirePermission("students:read")).Get("/{id}/parents", studentHandler.GetStudentParents)
 			})
 
 			// Finance
 			r.Route("/finance", func(r chi.Router) {
-				r.With(auth.RequirePermission("fees:read")).Get("/students/{id}/account",  financeHandler.GetFeeAccount)
+				r.With(auth.RequirePermission("fees:read")).Get("/students/{id}/account", financeHandler.GetFeeAccount)
 				r.With(auth.RequirePermission("fees:read")).Get("/students/{id}/payments", financeHandler.GetPaymentHistory)
-				r.With(auth.RequirePermission("fees:read")).Get("/summary",                financeHandler.GetFeeCollectionSummary)
-				r.With(auth.RequirePermission("fees:read")).Get("/outstanding",            financeHandler.GetOutstandingBalances)
-				r.Post("/pay/stk-push",                                                   financeHandler.InitiateSTKPush)
-				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/manual",         financeHandler.RecordManualPayment)
+				r.With(auth.RequirePermission("fees:read")).Get("/summary", financeHandler.GetFeeCollectionSummary)
+				r.With(auth.RequirePermission("fees:read")).Get("/outstanding", financeHandler.GetOutstandingBalances)
+				r.Post("/pay/stk-push", financeHandler.InitiateSTKPush)
+				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/manual", financeHandler.RecordManualPayment)
 			})
 
-			// Academics
+			// Academics (8-4-4)
 			r.Route("/academics", func(r chi.Router) {
-				r.With(auth.RequirePermission("attendance:read")).Get("/classes",                     academicsHandler.ListClasses)
-				r.With(auth.RequirePermission("attendance:read")).Get("/classes/{id}",                academicsHandler.GetClass)
-				r.With(auth.RequirePermission("attendance:read")).Get("/classes/{id}/timetable",      academicsHandler.GetClassTimetable)
-				r.With(auth.RequirePermission("attendance:read")).Get("/subjects",                    academicsHandler.ListSubjects)
-				r.With(auth.RequirePermission("attendance:read")).Get("/terms",                       academicsHandler.ListTerms)  
-				r.With(auth.RequirePermission("attendance:read")).Get("/my-timetable",                academicsHandler.GetMyTimetable)
-				r.With(auth.RequirePermission("attendance:read")).Get("/attendance/sheet",             academicsHandler.GetAttendanceSheet)
-				r.With(auth.RequirePermission("attendance:write")).Post("/attendance",                 academicsHandler.SubmitAttendance)
-				r.With(auth.RequirePermission("attendance:read")).Get("/attendance/summary",           academicsHandler.GetAttendanceSummary)
-				r.With(auth.RequirePermission("grades:read")).Get("/grades/components",               academicsHandler.GetGradeComponents)
-				r.With(auth.RequirePermission("grades:read")).Get("/grades/entries",                  academicsHandler.GetGradebook)
-				r.With(auth.RequirePermission("grades:write")).Post("/grades/entries",                academicsHandler.SaveGrades)
-				r.With(auth.RequirePermission("grades:write")).Post("/grades/components",          academicsHandler.CreateGradeComponent)
-				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate",       academicsHandler.GenerateReportCard)
+				r.With(auth.RequirePermission("attendance:read")).Get("/classes", academicsHandler.ListClasses)
+				r.With(auth.RequirePermission("attendance:read")).Get("/classes/{id}", academicsHandler.GetClass)
+				r.With(auth.RequirePermission("attendance:read")).Get("/classes/{id}/timetable", academicsHandler.GetClassTimetable)
+				r.With(auth.RequirePermission("attendance:read")).Get("/subjects", academicsHandler.ListSubjects)
+				r.With(auth.RequirePermission("attendance:read")).Get("/terms", academicsHandler.ListTerms)
+				r.With(auth.RequirePermission("attendance:read")).Get("/my-timetable", academicsHandler.GetMyTimetable)
+				r.With(auth.RequirePermission("attendance:read")).Get("/attendance/sheet", academicsHandler.GetAttendanceSheet)
+				r.With(auth.RequirePermission("attendance:write")).Post("/attendance", academicsHandler.SubmitAttendance)
+				r.With(auth.RequirePermission("attendance:read")).Get("/attendance/summary", academicsHandler.GetAttendanceSummary)
+				r.With(auth.RequirePermission("attendance:read")).Get("/attendance/today", academicsHandler.GetInstitutionAttendanceToday)
+				r.With(auth.RequirePermission("grades:read")).Get("/grades/components", academicsHandler.GetGradeComponents)
+				r.With(auth.RequirePermission("grades:read")).Get("/grades/entries", academicsHandler.GetGradebook)
+				r.With(auth.RequirePermission("grades:write")).Post("/grades/entries", academicsHandler.SaveGrades)
+				r.With(auth.RequirePermission("grades:write")).Post("/grades/components", academicsHandler.CreateGradeComponent)
+				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate", academicsHandler.GenerateReportCard)
 				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate-class", academicsHandler.GenerateReportCardsForClass)
-				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/publish",      academicsHandler.PublishReportCard)
-				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/unpublish",    academicsHandler.UnpublishReportCard)
-				r.With(auth.RequirePermission("attendance:read")).Get("/terms",                     academicsHandler.ListTerms)
-				
+				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/publish", academicsHandler.PublishReportCard)
+				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/unpublish", academicsHandler.UnpublishReportCard)
+			})
+
+			// CBC v1.0 academic layer — separate route group, separate
+			// package. Reuses the same grades:* permission keys as
+			// academics rather than inventing new ones — no new
+			// permissions/role_permissions seeding required for v1.0.
+			r.Route("/cbc", func(r chi.Router) {
+				r.With(auth.RequirePermission("grades:read")).Get("/learning-areas", cbcHandler.ListLearningAreas)
+				r.With(auth.RequirePermission("grades:write")).Post("/learning-areas", cbcHandler.CreateLearningArea)
+				r.With(auth.RequirePermission("grades:read")).Get("/components", cbcHandler.GetComponents)
+				r.With(auth.RequirePermission("grades:write")).Post("/components", cbcHandler.CreateComponent)
+				r.With(auth.RequirePermission("grades:read")).Get("/entries", cbcHandler.GetEntries)
+				r.With(auth.RequirePermission("grades:write")).Post("/entries", cbcHandler.SaveEntries)
+				r.With(auth.RequirePermission("grades:write")).Post("/teacher-assignments", cbcHandler.CreateTeacherAssignment)
+				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate-class", cbcHandler.GenerateReportCardsForClass)
+				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/publish", cbcHandler.PublishReportCard)
+				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/unpublish", cbcHandler.UnpublishReportCard)
+				// NOT YET BUILT (v1.0 follow-up, not v1.1 Curriculum
+				// Engine scope): rating-band CRUD for institution
+				// overrides — v1.0 ships with seeded defaults only,
+				// editable directly in the DB until this exists.
 			})
 
 			// Communications
 			r.Route("/communications", func(r chi.Router) {
-				r.With(auth.RequirePermission("announcements:read")).Get("/announcements",              commHandler.ListAnnouncements)
-				r.With(auth.RequirePermission("announcements:write")).Post("/announcements",            commHandler.CreateAnnouncement)
-				r.Post("/announcements/{id}/read",                                                      commHandler.MarkAnnouncementRead)
-				r.Get("/messages",                                                                      commHandler.GetThreads)
-				r.Get("/messages/{user_id}",                                                           commHandler.GetMessages)
-				r.Post("/messages",                                                                     commHandler.SendMessage)
+				r.With(auth.RequirePermission("announcements:read")).Get("/announcements", commHandler.ListAnnouncements)
+				r.With(auth.RequirePermission("announcements:write")).Post("/announcements", commHandler.CreateAnnouncement)
+				r.Post("/announcements/{id}/read", commHandler.MarkAnnouncementRead)
+				r.Get("/messages", commHandler.GetThreads)
+				r.Get("/messages/{user_id}", commHandler.GetMessages)
+				r.Post("/messages", commHandler.SendMessage)
 			})
 
 			// Parent portal — role-gated, not permission-gated
 			r.Route("/parent", func(r chi.Router) {
 				r.Use(auth.RequireRole("parent"))
-				r.Get("/children",                          studentHandler.GetMyChildren)
-				r.Get("/children/{id}/report-card",         academicsHandler.GetChildReportCard)
-				r.Get("/children/{id}/subject-scores",      academicsHandler.GetChildSubjectScores)
-				r.Get("/children/{id}/account",             financeHandler.GetFeeAccount)
-				r.Get("/children/{id}/attendance",          academicsHandler.GetAttendanceSummary) // uses class_id query param
-})
+				r.Get("/children", studentHandler.GetMyChildren)
+				r.Get("/children/{id}/report-card", academicsHandler.GetChildReportCard)
+				r.Get("/children/{id}/cbc-report-card", cbcHandler.GetChildReportCard)
+				r.Get("/children/{id}/subject-scores", academicsHandler.GetChildSubjectScores)
+				r.Get("/children/{id}/account", financeHandler.GetFeeAccount)
+				r.Get("/children/{id}/attendance", academicsHandler.GetAttendanceSummary) // uses class_id query param
+			})
 
 			// Digital Locker
 			r.Route("/locker", func(r chi.Router) {
@@ -245,11 +275,11 @@ func main() {
 			})
 
 			// Phase 2 stubs
-			r.Get("/staff",    stubHandler("hr:staff"))
+			r.Get("/staff", stubHandler("hr:staff"))
 			r.Get("/boarding", stubHandler("boarding"))
-			r.Get("/clinic",   stubHandler("clinic"))
-			r.Get("/library",  stubHandler("library"))
-			r.Get("/transport",stubHandler("transport"))
+			r.Get("/clinic", stubHandler("clinic"))
+			r.Get("/library", stubHandler("library"))
+			r.Get("/transport", stubHandler("transport"))
 		})
 	})
 

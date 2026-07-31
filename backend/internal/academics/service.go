@@ -105,13 +105,50 @@ func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID
 }
 
 // SubmitAttendance saves attendance records and locks the session.
-// SubmitAttendance saves attendance records and locks the session.
-func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID uuid.UUID, req *TakeAttendanceRequest) (*AttendanceSession, error) {
+//
+// Authorization (Kenyan-school convention): daily whole-class attendance
+// is a class-teacher responsibility, not something any teacher with
+// attendance:write should be able to submit for a class that isn't
+// theirs. canOverrideClassTeacher is computed by the caller from the
+// attendance:approve permission (held by Super Admin, and anyone else a
+// school chooses to grant it to — e.g. a deputy covering for an absent
+// class teacher) and lets that override happen without hardcoding a role
+// name here.
+//
+// Period-type attendance gets a lighter check for now: the teacher must
+// be timetabled somewhere in this class at all. It does NOT yet verify
+// they're timetabled for the specific subject/period being taken, and it
+// does NOT yet restrict the roster to only students enrolled in that
+// subject — both require a subject_enrollments concept that doesn't
+// exist yet (see TODO.md). Until then, period attendance still marks
+// every active student in the class, same as daily.
+func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID uuid.UUID, canOverrideClassTeacher bool, req *TakeAttendanceRequest) (*AttendanceSession, error) {
 	sessionDate, err := time.Parse("2006-01-02", req.SessionDate)
 	if err != nil {
 		return nil, fmt.Errorf("invalid session_date format")
 	}
-
+ 
+	class, err := s.repo.GetClassByID(ctx, institutionID, req.ClassID)
+	if err != nil {
+		return nil, fmt.Errorf("get class: %w", err)
+	}
+ 
+	if req.SessionType == "daily" {
+		if class.ClassTeacherID != nil && *class.ClassTeacherID != teacherID && !canOverrideClassTeacher {
+			return nil, ErrNotClassTeacher
+		}
+		// If the class has no assigned class teacher yet, any teacher with
+		// attendance:write may submit — there's no one else who could.
+	} else {
+		assigned, err := s.repo.TeacherHasAssignmentInClass(ctx, institutionID, teacherID, req.ClassID)
+		if err != nil {
+			return nil, fmt.Errorf("check teacher assignment: %w", err)
+		}
+		if !assigned && !canOverrideClassTeacher {
+			return nil, ErrNotAssignedToClass
+		}
+	}
+ 
 	// Validate every student in the request actually belongs to this class,
 	// before writing anything. Without this check, a wrong class_id in the
 	// request silently creates attendance records for students who were
@@ -129,20 +166,20 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
 			return nil, fmt.Errorf("student %s is not enrolled in class %s", entry.StudentID, req.ClassID)
 		}
 	}
-
+ 
 	session, err := s.repo.GetOrCreateSession(ctx, institutionID, req.ClassID, teacherID, sessionDate, req.SessionType)
 	if err != nil {
 		return nil, err
 	}
-
+ 
 	if session.Status == "locked" {
 		return nil, ErrSessionLocked
 	}
-
+ 
 	if err := s.repo.SaveAttendanceRecords(ctx, institutionID, session.ID, req.Records); err != nil {
 		return nil, fmt.Errorf("save attendance: %w", err)
 	}
-
+ 
 	// Publish absent events so notifications are sent to parents
 	for _, entry := range req.Records {
 		if entry.Status == "absent" {
@@ -152,7 +189,7 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
 					Msg("could not find primary contact for absent student — skipping notification")
 				continue
 			}
-
+ 
 			evt := events.New(events.EventStudentAbsent, institutionID.String())
 			evt.EntityType = "student"
 			evt.EntityID = entry.StudentID.String()
@@ -164,7 +201,7 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
 			_ = s.publisher.Publish(evt)
 		}
 	}
-
+ 
 	session.Status = "submitted"
 	now := time.Now()
 	session.SubmittedAt = &now

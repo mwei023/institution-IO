@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { Loader2, AlertTriangle, BookOpen, Award, Users, Calendar } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
@@ -60,7 +60,7 @@ function PercentageBar({ value }: { value: number }) {
   );
 }
 
-export default function ParentResultsPage() {
+function ParentResultsContent() {
   const searchParams = useSearchParams();
   const childId = searchParams.get("child");
 
@@ -269,5 +269,22 @@ export default function ParentResultsPage() {
         </p>
       </div>
     </DashboardLayout>
+  );
+}
+
+export default function ParentResultsPage() {
+  return (
+    <Suspense
+      fallback={
+        <DashboardLayout title="Report Card">
+          <div className="flex items-center justify-center h-64 gap-2 text-neutral-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            <span className="text-sm">Loading report card…</span>
+          </div>
+        </DashboardLayout>
+      }
+    >
+      <ParentResultsContent />
+    </Suspense>
   );
 }

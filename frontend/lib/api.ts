@@ -141,6 +141,11 @@ export const academicsAPI = {
     api.get("/academics/attendance/summary", {
       params: { class_id: classId, start_date: startDate, end_date: endDate },
     }),
+  // Institution-wide attendance snapshot for the principal dashboard —
+  // distinct from getAttendanceSummary, which is always per-class.
+  // Defaults to today; pass a date to check historical/seeded data.
+  getAttendanceToday: (date?: string) =>
+    api.get("/academics/attendance/today", { params: date ? { date } : {} }),
 
   listSubjects: () => api.get("/academics/subjects"),
   getGradeComponents: (classId: string, subjectId: string, termId: string) =>
@@ -170,7 +175,7 @@ export const academicsAPI = {
   unpublishReportCard: (data: { student_id: string; term_id: string }) =>
     api.post("/academics/report-cards/unpublish", data),
 
-listTerms: () => api.get("/academics/terms"),
+  listTerms: () => api.get("/academics/terms"),
 };
 
 export const parentAPI = {

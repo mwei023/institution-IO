@@ -67,7 +67,6 @@ export default function TeacherAttendancePage() {
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState<string | null>(null);
 
-  // Local editable status per student_id, seeded from the sheet response
   const [statusMap, setStatusMap] = useState<Record<string, AttendanceStatus>>({});
   const [remarksMap, setRemarksMap] = useState<Record<string, string>>({});
 
@@ -75,7 +74,6 @@ export default function TeacherAttendancePage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
 
-  // Load real classes for the dropdown
   useEffect(() => {
     academicsAPI
       .listClasses()
@@ -93,10 +91,16 @@ export default function TeacherAttendancePage() {
       .getAttendanceSheet(classId, date)
       .then((res) => {
         const data: AttendanceSheetResponse = res.data?.data;
-        setSheet(data);
+        // Defensive: normalize records to an array regardless of what the
+        // API returns. Backend now always sends "records": [] for empty
+        // classes (see repository.go GetSessionStudents fix), but this
+        // guard costs nothing and protects against any other endpoint
+        // shape that might omit/null the field.
+        const safeData: AttendanceSheetResponse = { ...data, records: data?.records ?? [] };
+        setSheet(safeData);
         const sMap: Record<string, AttendanceStatus> = {};
         const rMap: Record<string, string> = {};
-        (data.records ?? []).forEach((r) => {
+        safeData.records.forEach((r) => {
           sMap[r.student_id] = (r.status as AttendanceStatus) || "present";
           rMap[r.student_id] = r.remarks ?? "";
         });
@@ -131,7 +135,7 @@ export default function TeacherAttendancePage() {
   const markAllPresent = () => {
     if (!sheet) return;
     const sMap: Record<string, AttendanceStatus> = {};
-    sheet.records.forEach((r) => { sMap[r.student_id] = "present"; });
+    (sheet.records ?? []).forEach((r) => { sMap[r.student_id] = "present"; });
     setStatusMap(sMap);
   };
 
@@ -145,14 +149,13 @@ export default function TeacherAttendancePage() {
         class_id: sheet.class_id,
         session_date: sessionDate,
         session_type: "daily",
-        records: sheet.records.map((r) => ({
+        records: (sheet.records ?? []).map((r) => ({
           student_id: r.student_id,
           status: statusMap[r.student_id] ?? "present",
           remarks: remarksMap[r.student_id] ?? "",
         })),
       });
       setSubmitSuccess(true);
-      // Refresh the sheet so the locked/submitted state reflects reality
       loadSheet(sheet.class_id, sessionDate);
     } catch (err: any) {
       setSubmitError(
@@ -168,6 +171,7 @@ export default function TeacherAttendancePage() {
   const presentCount = Object.values(statusMap).filter((s) => s === "present").length;
   const lateCount = Object.values(statusMap).filter((s) => s === "late").length;
   const excusedCount = Object.values(statusMap).filter((s) => s === "excused").length;
+  const records = sheet?.records ?? [];
 
   return (
     <DashboardLayout title="Take Attendance">
@@ -179,7 +183,6 @@ export default function TeacherAttendancePage() {
           </div>
         </div>
 
-        {/* Class + date selection */}
         <Card>
           <CardContent className="py-4 flex flex-wrap items-end gap-4">
             <div className="flex-1 min-w-[220px]">
@@ -253,7 +256,7 @@ export default function TeacherAttendancePage() {
 
         {sheet && !sheetLoading && !sheetError && (
           <>
-            {sheet.records.length === 0 ? (
+            {records.length === 0 ? (
               <Card>
                 <CardContent className="py-12 text-center text-sm text-neutral-500">
                   No active students are enrolled in this class.
@@ -261,7 +264,6 @@ export default function TeacherAttendancePage() {
               </Card>
             ) : (
               <>
-                {/* Summary strip */}
                 <div className="grid grid-cols-4 gap-3">
                   <div className="rounded-lg p-3 bg-success-light text-success-dark text-center">
                     <p className="text-xl font-semibold">{presentCount}</p>
@@ -297,7 +299,7 @@ export default function TeacherAttendancePage() {
                       </div>
                     )}
                     <div className="divide-y divide-neutral-50">
-                      {sheet.records.map((r) => {
+                      {records.map((r) => {
                         const current = statusMap[r.student_id] ?? "present";
                         return (
                           <div key={r.student_id} className="px-6 py-3.5 flex flex-wrap items-center gap-3">

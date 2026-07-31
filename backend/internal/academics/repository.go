@@ -126,7 +126,6 @@ func (r *Repository) ListSubjects(ctx context.Context, institutionID uuid.UUID) 
 
 // ─── Timetable ────────────────────────────────────────────────────
 
-// GetTimetableForClass returns all published timetable periods for a class in a term.
 func (r *Repository) GetTimetableForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TimetablePeriod, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT tp.id, tp.institution_id, tp.term_id, tp.class_id,
@@ -169,7 +168,6 @@ func (r *Repository) GetTimetableForClass(ctx context.Context, institutionID, cl
 	return periods, rows.Err()
 }
 
-// GetTimetableForTeacher returns a teacher's timetable for a term.
 func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, teacherID, termID uuid.UUID) ([]*TimetablePeriod, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT tp.id, tp.institution_id, tp.term_id, tp.class_id,
@@ -214,7 +212,6 @@ func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, 
 
 // ─── Attendance ───────────────────────────────────────────────────
 
-// GetOrCreateSession finds or creates today's attendance session for a class.
 func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, classID, teacherID uuid.UUID, sessionDate time.Time, sessionType string) (*AttendanceSession, error) {
 	var session AttendanceSession
 	err := r.db.QueryRow(ctx, `
@@ -240,7 +237,6 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 		return nil, err
 	}
 
-	// Create new session
 	newID := uuid.New()
 	_, err = r.db.Exec(ctx, `
 		INSERT INTO attendance_sessions
@@ -270,10 +266,18 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 	}, nil
 }
 
-// GetSessionStudents returns all active students in a class for attendance taking.
 // GetSessionStudents returns all active students in a class for attendance
 // taking, along with their actual saved status/remarks if a record already
 // exists for this session — otherwise defaults to "present" for a fresh sheet.
+//
+// FIX (session 3): was `var records []*AttendanceRecord` (nil when a class
+// has zero active students), which combined with the AttendanceSession
+// model's `records` json tag to make the API response omit the "records"
+// key entirely for empty classes — the frontend then crashed on
+// `sheet.records.length` because `sheet.records` was `undefined`, not `[]`.
+// Now always returns a non-nil (possibly empty) slice, and the model's
+// json tag no longer has `omitempty`, so empty classes serialize as
+// `"records": []` instead of omitting the key.
 func (r *Repository) GetSessionStudents(ctx context.Context, institutionID, classID, sessionID uuid.UUID) ([]*AttendanceRecord, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT s.id, s.first_name || ' ' || s.last_name,
@@ -295,7 +299,7 @@ func (r *Repository) GetSessionStudents(ctx context.Context, institutionID, clas
 	}
 	defer rows.Close()
 
-	var records []*AttendanceRecord
+	records := []*AttendanceRecord{}
 	for rows.Next() {
 		var rec AttendanceRecord
 		if err := rows.Scan(&rec.StudentID, &rec.Name, &rec.ID, &rec.Status, &rec.Remarks); err != nil {
@@ -306,7 +310,6 @@ func (r *Repository) GetSessionStudents(ctx context.Context, institutionID, clas
 	return records, rows.Err()
 }
 
-// SaveAttendanceRecords upserts attendance records for a session.
 func (r *Repository) SaveAttendanceRecords(ctx context.Context, institutionID, sessionID uuid.UUID, entries []AttendanceEntry) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -332,7 +335,6 @@ func (r *Repository) SaveAttendanceRecords(ctx context.Context, institutionID, s
 		}
 	}
 
-	// Mark session submitted
 	_, err = tx.Exec(ctx, `
 		UPDATE attendance_sessions
 		SET status = 'submitted', submitted_at = NOW()
@@ -344,7 +346,6 @@ func (r *Repository) SaveAttendanceRecords(ctx context.Context, institutionID, s
 	return tx.Commit(ctx)
 }
 
-// GetAttendanceSummary returns per-student attendance stats for a class/term.
 func (r *Repository) GetAttendanceSummary(ctx context.Context, institutionID, classID uuid.UUID, startDate, endDate time.Time) ([]*AttendanceSummary, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT
@@ -391,7 +392,6 @@ func (r *Repository) GetAttendanceSummary(ctx context.Context, institutionID, cl
 
 // ─── Grades ───────────────────────────────────────────────────────
 
-// ListGradeComponents returns all grade components for a class/subject/term.
 func (r *Repository) ListGradeComponents(ctx context.Context, institutionID, classID, subjectID, termID uuid.UUID) ([]*GradeComponent, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, institution_id, class_id, subject_id, term_id, name, weight, max_marks
@@ -419,7 +419,6 @@ func (r *Repository) ListGradeComponents(ctx context.Context, institutionID, cla
 	return components, rows.Err()
 }
 
-// GetGradebook returns all grade entries for a class/subject/term/component.
 func (r *Repository) GetGradebook(ctx context.Context, institutionID, componentID uuid.UUID) ([]*GradeEntry, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT s.id,
@@ -459,8 +458,6 @@ func (r *Repository) GetGradebook(ctx context.Context, institutionID, componentI
 	return entries, rows.Err()
 }
 
-// SaveGradeEntries bulk-upserts grade entries.
-// SaveGradeEntries bulk-upserts grade entries for a single component.
 func (r *Repository) SaveGradeEntries(ctx context.Context, institutionID, componentID, enteredBy uuid.UUID, entries []GradeInput) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -485,7 +482,6 @@ func (r *Repository) SaveGradeEntries(ctx context.Context, institutionID, compon
 	return tx.Commit(ctx)
 }
 
-// GetCurrentTerm retrieves the currently active term for an institution.
 func (r *Repository) GetCurrentTerm(ctx context.Context, institutionID uuid.UUID) (*uuid.UUID, error) {
 	var termID uuid.UUID
 	err := r.db.QueryRow(ctx, `
@@ -502,15 +498,12 @@ func (r *Repository) GetCurrentTerm(ctx context.Context, institutionID uuid.UUID
 	return &termID, nil
 }
 
-// PrimaryContactInfo holds what's needed to notify a student's primary parent.
 type PrimaryContactInfo struct {
 	ParentPhone string
 	ParentName  string
 	StudentName string
 }
 
-// GetPrimaryContactForStudent returns the primary parent/guardian contact
-// details for a student, for use in notification payloads.
 func (r *Repository) GetPrimaryContactForStudent(ctx context.Context, institutionID, studentID uuid.UUID) (*PrimaryContactInfo, error) {
 	var info PrimaryContactInfo
 	err := r.db.QueryRow(ctx, `
@@ -535,8 +528,6 @@ func (r *Repository) GetPrimaryContactForStudent(ctx context.Context, institutio
 	return &info, nil
 }
 
-// GetActiveStudentIDsForClass returns the IDs of all active students
-// currently enrolled in a class, for roster validation.
 func (r *Repository) GetActiveStudentIDsForClass(ctx context.Context, institutionID, classID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id FROM students
@@ -560,7 +551,6 @@ func (r *Repository) GetActiveStudentIDsForClass(ctx context.Context, institutio
 	return ids, rows.Err()
 }
 
-// CreateGradeComponent inserts a new assessment component (e.g. "CAT 1", "Midterm").
 func (r *Repository) CreateGradeComponent(ctx context.Context, institutionID uuid.UUID, req *CreateGradeComponentRequest) (*GradeComponent, error) {
 	gc := &GradeComponent{
 		ID:            uuid.New(),
@@ -585,15 +575,12 @@ func (r *Repository) CreateGradeComponent(ctx context.Context, institutionID uui
 	return gc, nil
 }
 
-// SubjectScore is one subject's weighted percentage for a student/term.
 type SubjectScore struct {
 	SubjectID   uuid.UUID `json:"subject_id"`
 	SubjectName string    `json:"subject_name"`
 	Percentage  float64   `json:"percentage"`
 }
 
-// GetSubjectScoresForStudent computes each subject's weighted percentage
-// for a student in a term, based on real grade_entries and grade_components.
 func (r *Repository) GetSubjectScoresForStudent(ctx context.Context, institutionID, studentID, termID uuid.UUID) ([]*SubjectScore, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT
@@ -627,15 +614,10 @@ func (r *Repository) GetSubjectScoresForStudent(ctx context.Context, institution
 	return scores, rows.Err()
 }
 
-// GetAggregateMarksForStudent computes the term aggregate as the simple
-// average of each subject's weighted percentage. Each subject contributes
-// equally regardless of its internal component count, since percentages
-// are already normalized to a 0-100 scale per subject.
 func (r *Repository) GetAggregateMarksForStudent(ctx context.Context, institutionID, studentID, termID uuid.UUID) (float64, int, error) {
 	var aggregate float64
 	var subjectCount int
-	// AFTER:
-err := r.db.QueryRow(ctx, `
+	err := r.db.QueryRow(ctx, `
     SELECT COALESCE(ROUND(AVG(percentage), 2), 0), COUNT(*)
     FROM (
         SELECT
@@ -657,15 +639,12 @@ err := r.db.QueryRow(ctx, `
 	return aggregate, subjectCount, nil
 }
 
-// StudentRank holds a student's aggregate and computed rank within a class or stream.
 type StudentRank struct {
 	StudentID uuid.UUID
 	Aggregate float64
 	Rank      int
 }
 
-// GetClassRankings computes aggregate marks and rank position for every
-// active student in a class for a given term, ordered best-to-worst.
 func (r *Repository) GetClassRankings(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*StudentRank, error) {
 	rows, err := r.db.Query(ctx, `
 		WITH subject_percentages AS (
@@ -710,7 +689,6 @@ func (r *Repository) GetClassRankings(ctx context.Context, institutionID, classI
 	return rankings, rows.Err()
 }
 
-// GetTermDates returns a term's start and end dates.
 func (r *Repository) GetTermDates(ctx context.Context, institutionID, termID uuid.UUID) (time.Time, time.Time, error) {
 	var start, end time.Time
 	err := r.db.QueryRow(ctx, `
@@ -724,17 +702,6 @@ func (r *Repository) GetTermDates(ctx context.Context, institutionID, termID uui
 	return start, end, nil
 }
 
-// UpsertReportCard creates or updates a student's report card for a term.
-// Uses the table's existing UNIQUE(institution_id, student_id, term_id)
-// constraint to safely re-generate a report without creating duplicates.
-//
-// Guard: if this student's report card for this term is already
-// published, the write is refused entirely — it does NOT silently
-// overwrite the published numbers and does NOT downgrade status back
-// to draft. A published report is something a parent may already have
-// seen; changing it invisibly on a routine bulk re-run is worse than
-// returning an error. Callers get ErrReportCardPublished and must call
-// UnpublishReportCard first if a correction is genuinely needed.
 func (r *Repository) UpsertReportCard(ctx context.Context, institutionID, classID, termID uuid.UUID, rc *ReportCard) error {
 	var id uuid.UUID
 	err := r.db.QueryRow(ctx, `
@@ -771,7 +738,6 @@ func (r *Repository) UpsertReportCard(ctx context.Context, institutionID, classI
 	).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// WHERE excluded the conflicting row — it exists and is published.
 			return ErrReportCardPublished
 		}
 		return fmt.Errorf("upsert report card: %w", err)
@@ -780,12 +746,6 @@ func (r *Repository) UpsertReportCard(ctx context.Context, institutionID, classI
 	return nil
 }
 
-// UnpublishReportCard reverts a published report card back to draft and
-// clears published_at. This is the only sanctioned way to make a
-// published report editable again — a deliberate action an admin has
-// to explicitly take, rather than something that happens as a side
-// effect of re-running generation. Idempotent: unpublishing an
-// already-draft card just returns it unchanged.
 func (r *Repository) UnpublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
 	var rc ReportCard
 	err := r.db.QueryRow(ctx, `
@@ -812,12 +772,9 @@ func (r *Repository) UnpublishReportCard(ctx context.Context, institutionID, stu
 	if ferr != nil {
 		return nil, ferr
 	}
-	return existing, nil // already draft — no-op
+	return existing, nil
 }
 
-// getReportCardRaw fetches a report card by its natural key. Used to
-// disambiguate "not found" from "already in target state" in the
-// idempotent publish/unpublish paths above.
 func (r *Repository) getReportCardRaw(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
 	var rc ReportCard
 	err := r.db.QueryRow(ctx, `
@@ -841,10 +798,6 @@ func (r *Repository) getReportCardRaw(ctx context.Context, institutionID, studen
 	return &rc, nil
 }
 
-// PublishReportCard transitions a report card from draft to published,
-// stamping published_at. Idempotent: publishing an already-published
-// card is a no-op that returns the existing record, so a retried or
-// double-clicked request never overwrites the original published_at.
 func (r *Repository) PublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
 	var rc ReportCard
 	err := r.db.QueryRow(ctx, `
@@ -871,11 +824,9 @@ func (r *Repository) PublishReportCard(ctx context.Context, institutionID, stude
 	if ferr != nil {
 		return nil, ferr
 	}
-	return existing, nil // already published — idempotent return
+	return existing, nil
 }
 
-
-// GenerateReportCard computes and saves a report card for a single student.
 func (s *Service) GenerateReportCard(ctx context.Context, institutionID, studentID, classID, termID uuid.UUID) (*ReportCard, error) {
 	rankings, err := s.repo.GetClassRankings(ctx, institutionID, classID, termID)
 	if err != nil {
@@ -895,11 +846,6 @@ func (s *Service) GenerateReportCard(ctx context.Context, institutionID, student
 	return s.generateReportCardForStudent(ctx, institutionID, studentID, classID, termID, rankings, attendance)
 }
 
-// generateReportCardForStudent computes one student's report card using
-// class-wide data (rankings, attendance) the caller already fetched.
-// GenerateReportCard fetches that data for a single call; bulk generation
-// fetches it ONCE per class and calls this directly for every student,
-// instead of re-running the rankings/attendance queries per student.
 func (s *Service) generateReportCardForStudent(
 	ctx context.Context,
 	institutionID, studentID, classID, termID uuid.UUID,
@@ -951,15 +897,9 @@ func (s *Service) generateReportCardForStudent(
 	return rc, nil
 }
 
-// GenerateReportCardsForClass generates (or regenerates) a report card for
-// every active student in a class for the given term. Each student is
-// processed independently — one student's failure (no grades entered yet,
-// absent from every assessment, etc.) is recorded and skipped; it never
-// aborts the rest of the batch. Class rankings and attendance summaries
-// are computed once for the whole class and reused for every student.
 func (s *Service) GenerateReportCardsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) (*BulkReportCardResult, error) {
 	if _, err := s.repo.GetClassByID(ctx, institutionID, classID); err != nil {
-		return nil, err // propagates ErrClassNotFound
+		return nil, err
 	}
 
 	studentIDs, err := s.repo.GetActiveStudentIDsForClass(ctx, institutionID, classID)
@@ -1012,16 +952,10 @@ func (s *Service) GenerateReportCardsForClass(ctx context.Context, institutionID
 	return result, nil
 }
 
-// PublishReportCard transitions a single student's report card from
-// draft to published. See Repository.PublishReportCard for idempotency
-// semantics.
 func (s *Service) PublishReportCard(ctx context.Context, institutionID, studentID, termID uuid.UUID) (*ReportCard, error) {
 	return s.repo.PublishReportCard(ctx, institutionID, studentID, termID)
 }
 
-// GetPublishedReportCardForStudent returns the most recently published
-// report card for a student, with display fields joined in.
-// Returns ErrReportCardNotFound if no published card exists yet.
 func (r *Repository) GetPublishedReportCardForStudent(ctx context.Context, institutionID, studentID uuid.UUID) (*ReportCard, error) {
 	var rc ReportCard
 	err := r.db.QueryRow(ctx, `
@@ -1058,7 +992,6 @@ func (r *Repository) GetPublishedReportCardForStudent(ctx context.Context, insti
 	return &rc, nil
 }
 
-// Term is a school term with its dates and current status.
 type Term struct {
 	ID            uuid.UUID `json:"id"`
 	InstitutionID uuid.UUID `json:"institution_id"`
@@ -1068,7 +1001,6 @@ type Term struct {
 	IsCurrent     bool      `json:"is_current"`
 }
 
-// ListTerms returns all terms for an institution, ordered most recent first.
 func (r *Repository) ListTerms(ctx context.Context, institutionID uuid.UUID) ([]*Term, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, institution_id, name, start_date, end_date, is_current

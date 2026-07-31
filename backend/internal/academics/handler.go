@@ -170,18 +170,32 @@ func (h *Handler) SubmitAttendance(w http.ResponseWriter, r *http.Request) {
 	claims := auth.ClaimsFromContext(r.Context())
 	teacherID, _ := uuid.Parse(claims.UserID)
 
+	// attendance:approve is the existing permission for "not the class
+	// teacher, but allowed to submit daily attendance anyway" — held by
+	// Super Admin today, and by anyone else a school later chooses to
+	// grant it to (e.g. a deputy covering for an absent class teacher).
+	canOverride := claims.HasPermission("attendance:approve")
+
 	var req TakeAttendanceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
 		return
 	}
 
-	session, err := h.svc.SubmitAttendance(r.Context(), institutionID, teacherID, &req)
+	session, err := h.svc.SubmitAttendance(r.Context(), institutionID, teacherID, canOverride, &req)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrSessionLocked):
 			response.Error(w, http.StatusConflict, "SESSION_LOCKED",
 				"This attendance session has been locked and cannot be modified")
+		case errors.Is(err, ErrNotClassTeacher):
+			response.Error(w, http.StatusForbidden, "NOT_CLASS_TEACHER",
+				"Only this class's assigned class teacher can take daily attendance")
+		case errors.Is(err, ErrNotAssignedToClass):
+			response.Error(w, http.StatusForbidden, "NOT_ASSIGNED_TO_CLASS",
+				"You are not timetabled to teach this class")
+		case errors.Is(err, ErrClassNotFound):
+			response.NotFound(w, "CLASS")
 		default:
 			log.Error().Err(err).Msg("submit attendance")
 			response.Error(w, http.StatusBadRequest, "ATTENDANCE_ERROR", err.Error())
@@ -380,8 +394,6 @@ func (h *Handler) GenerateReportCardsForClass(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	// 200, not 201 — this is a bulk compute/upsert that may partially
-	// succeed, not the creation of a single resource.
 	response.Ok(w, result)
 }
 
@@ -421,7 +433,7 @@ func (h *Handler) GetChildReportCard(w http.ResponseWriter, r *http.Request) {
 	rc, err := h.svc.GetChildReportCard(r.Context(), institutionID, studentID)
 	if err != nil {
 		if errors.Is(err, ErrReportCardNotFound) {
-			response.Ok(w, nil) // no published card yet — not an error for the parent
+			response.Ok(w, nil)
 			return
 		}
 		log.Error().Err(err).Msg("get child report card")

@@ -139,9 +139,16 @@ export default function AdmissionsPage() {
                 title="No applications found"
                 description="Admissions will appear here once submitted."
                 action={
-              <Button size="sm" asChild>
-                <a href="/admissions/new">New Application</a>
-              </Button>
+              <Button
+  size="sm"
+  variant="ghost"
+  type="button"
+  onClick={() => { 
+    window.location.href = "/admissions/new"; 
+  }}
+>
+  New Application
+</Button>   
             }
 
               />

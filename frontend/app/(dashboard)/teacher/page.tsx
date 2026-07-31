@@ -52,7 +52,7 @@ export default function TeacherDashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <Card className="lg:col-span-2">
             <CardHeader className="flex-row items-center justify-between pb-3">
-              <CardTitle>Today's Timetable</CardTitle>
+              <CardTitle>Today&apos;s Timetable</CardTitle>
               <Button size="sm" variant="outline" onClick={() => { window.location.href = "/teacher/attendance"; }}>
                 Take Attendance
               </Button>
