@@ -22,6 +22,7 @@ import (
 	digitalocker "institution-os/internal/digital_locker"
 	"institution-os/internal/finance"
 	finmpesa "institution-os/internal/finance/mpesa"
+	"institution-os/internal/institution"
 	"institution-os/internal/notification"
 	"institution-os/internal/student"
 	"institution-os/pkg/config"
@@ -84,6 +85,9 @@ func main() {
 	cbcRepo := cbc.NewRepository(dbPool)
 	cbcSvc := cbc.NewService(cbcRepo, academicsRepo, publisher)
 
+	institutionRepo := institution.NewRepository(dbPool)
+	institutionSvc := institution.NewService(institutionRepo)
+
 	commRepo := communication.NewRepository(dbPool)
 	commSvc := communication.NewService(commRepo, publisher)
 
@@ -105,6 +109,9 @@ func main() {
 	financeHandler   := finance.NewHandler(financeSvc)
 	academicsHandler := academics.NewHandler(academicsSvc)
 	cbcHandler       := cbc.NewHandler(cbcSvc)
+
+	institutionHandler := institution.NewHandler(institutionSvc)
+	
 	commHandler      := communication.NewHandler(commSvc)
 	var lockerHandler *digitalocker.Handler
 	if lockerSvc != nil {
@@ -151,6 +158,7 @@ func main() {
 			// Auth
 			r.Get("/auth/me", authHandler.Me)
 			r.Post("/auth/change-password", authHandler.ChangePassword)
+			r.Get("/institution/context", institutionHandler.GetContext)
 
 			// Admissions & Students
 			r.Route("/admissions", func(r chi.Router) {
