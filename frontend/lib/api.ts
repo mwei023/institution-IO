@@ -178,6 +178,33 @@ export const academicsAPI = {
   listTerms: () => api.get("/academics/terms"),
 };
 
+export const cbcAPI = {
+  listLearningAreas: () => api.get("/cbc/learning-areas"),
+  createLearningArea: (data: { name: string; code?: string; is_compulsory: boolean }) =>
+    api.post("/cbc/learning-areas", data),
+  getComponents: (classId: string, learningAreaId: string, termId: string) =>
+    api.get("/cbc/components", { params: { class_id: classId, learning_area_id: learningAreaId, term_id: termId } }),
+  createComponent: (data: {
+    class_id: string; learning_area_id: string; term_id: string;
+    name: string; weight: number; max_marks: number;
+  }) => api.post("/cbc/components", data),
+  getEntries: (componentId: string) =>
+    api.get("/cbc/entries", { params: { component_id: componentId } }),
+  saveEntries: (data: {
+    component_id: string;
+    entries: Array<{ student_id: string; marks: number | null; is_absent: boolean }>;
+  }) => api.post("/cbc/entries", data),
+  createTeacherAssignment: (data: {
+    class_id: string; learning_area_id: string; teacher_id: string; term_id: string;
+  }) => api.post("/cbc/teacher-assignments", data),
+  generateReportCardsForClass: (data: { class_id: string; term_id: string }) =>
+    api.post("/cbc/report-cards/generate-class", data),
+  publishReportCard: (data: { student_id: string; term_id: string }) =>
+    api.post("/cbc/report-cards/publish", data),
+  unpublishReportCard: (data: { student_id: string; term_id: string }) =>
+    api.post("/cbc/report-cards/unpublish", data),
+};
+
 export const parentAPI = {
   getChildren: () => api.get("/parent/children"),
   getChildReportCard: (studentId: string) =>

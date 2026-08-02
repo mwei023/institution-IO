@@ -55,7 +55,8 @@ const teacherNavItems: NavItem[] = [
   { label: "Dashboard",    href: "/teacher",            icon: LayoutDashboard },
   { label: "Attendance",   href: "/teacher/attendance", icon: UserCheck },
   { label: "Grades",       href: "/teacher/grades",     icon: BookOpen, curriculum: "844" },
-  { label: "Report Cards", href: "/academics/report-cards", icon: FileText, curriculum: "844" },
+  { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
+  { label: "Report Cards",   href: "/academics/cbc-report-cards", icon: FileText, permission: "grades:write", curriculum: "cbc" },
   { label: "Assignments",  href: "/teacher/assignments",icon: FileText },
   { label: "Messages",     href: "/teacher/messages",   icon: MessageSquare },
 ];
