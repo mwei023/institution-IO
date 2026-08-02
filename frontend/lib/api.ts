@@ -187,7 +187,3 @@ export const parentAPI = {
   getChildFeeAccount: (studentId: string) =>
     api.get(`/parent/children/${studentId}/account`),
 };
-
-export const institutionAPI = {
-  getContext: () => api.get("/institution/context"),
-};
