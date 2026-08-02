@@ -18,7 +18,7 @@
 -- as it does today with zero behavior change from this migration alone.
 ALTER TABLE institutions
   ADD COLUMN IF NOT EXISTS curriculum_type VARCHAR(20) NOT NULL DEFAULT '844';
-  -- expected values for now: '844', 'cbe'
+  -- expected values for now: '844', 'cbc'
 
 -- ─── Learning Areas ─────────────────────────────────────────────────
 -- The correct CBC academic entity, root of the future curriculum
@@ -170,20 +170,20 @@ CREATE TABLE IF NOT EXISTS learning_area_report_card_lines (
 INSERT INTO curriculum_rating_bands
   (curriculum_type, grade_band, institution_id, code, label, min_pct, max_pct, points, default_statement, sort_order)
 VALUES
-  ('cbe', 'senior_school', NULL, 'EE1', 'Exceeding Expectation', 90, 100, 8, 'Outstanding performance.', 1),
-  ('cbe', 'senior_school', NULL, 'EE2', 'Exceeding Expectation', 75, 89,  7, 'Very good performance.', 2),
-  ('cbe', 'senior_school', NULL, 'ME1', 'Meeting Expectation',   58, 74,  6, 'Meets the expected competency.', 3),
-  ('cbe', 'senior_school', NULL, 'ME2', 'Meeting Expectation',   41, 57,  5, 'Meets the expected competency, fairly.', 4),
-  ('cbe', 'senior_school', NULL, 'AE1', 'Approaching Expectation', 31, 40, 4, 'Approaching expectation; continued practice recommended.', 5),
-  ('cbe', 'senior_school', NULL, 'AE2', 'Approaching Expectation', 21, 30, 3, 'Approaching expectation; needs more practice.', 6),
-  ('cbe', 'senior_school', NULL, 'BE1', 'Below Expectation', 11, 20, 2, 'Requires additional support and improvement.', 7),
-  ('cbe', 'senior_school', NULL, 'BE2', 'Below Expectation', 0,  10, 1, 'Requires significant support and improvement.', 8),
+  ('cbc', 'senior_school', NULL, 'EE1', 'Exceeding Expectation', 90, 100, 8, 'Outstanding performance.', 1),
+  ('cbc', 'senior_school', NULL, 'EE2', 'Exceeding Expectation', 75, 89,  7, 'Very good performance.', 2),
+  ('cbc', 'senior_school', NULL, 'ME1', 'Meeting Expectation',   58, 74,  6, 'Meets the expected competency.', 3),
+  ('cbc', 'senior_school', NULL, 'ME2', 'Meeting Expectation',   41, 57,  5, 'Meets the expected competency, fairly.', 4),
+  ('cbc', 'senior_school', NULL, 'AE1', 'Approaching Expectation', 31, 40, 4, 'Approaching expectation; continued practice recommended.', 5),
+  ('cbc', 'senior_school', NULL, 'AE2', 'Approaching Expectation', 21, 30, 3, 'Approaching expectation; needs more practice.', 6),
+  ('cbc', 'senior_school', NULL, 'BE1', 'Below Expectation', 11, 20, 2, 'Requires additional support and improvement.', 7),
+  ('cbc', 'senior_school', NULL, 'BE2', 'Below Expectation', 0,  10, 1, 'Requires significant support and improvement.', 8),
   -- Junior School default: 4 bands, no sub-levels, per New Bridgeport's
   -- real Grade 7 report card. Percentage cutoffs are that school's own
   -- convention, not independently verified against a KICD primary
   -- source — same caveat as above, arguably stronger here since this
   -- is a single data point, not a cross-corroborated national scale.
-  ('cbe', 'junior_school', NULL, 'EE', 'Exceeding Expectation',   91, 100, 4, 'Outstanding performance.', 1),
-  ('cbe', 'junior_school', NULL, 'ME', 'Meeting Expectation',    61, 90,  3, 'Meets the expected competency.', 2),
-  ('cbe', 'junior_school', NULL, 'AE', 'Approaching Expectation', 31, 60,  2, 'Approaching expectation; continued practice recommended.', 3),
-  ('cbe', 'junior_school', NULL, 'BE', 'Below Expectation',       0,  30,  1, 'Requires additional support and improvement.', 4);
+  ('cbc', 'junior_school', NULL, 'EE', 'Exceeding Expectation',   91, 100, 4, 'Outstanding performance.', 1),
+  ('cbc', 'junior_school', NULL, 'ME', 'Meeting Expectation',    61, 90,  3, 'Meets the expected competency.', 2),
+  ('cbc', 'junior_school', NULL, 'AE', 'Approaching Expectation', 31, 60,  2, 'Approaching expectation; continued practice recommended.', 3),
+  ('cbc', 'junior_school', NULL, 'BE', 'Below Expectation',       0,  30,  1, 'Requires additional support and improvement.', 4);
