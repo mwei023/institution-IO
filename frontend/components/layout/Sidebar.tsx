@@ -1,5 +1,6 @@
 "use client";
-import React, { useState } from "react";
+
+import React, { useState, useEffect} from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
@@ -13,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { authAPI } from "@/lib/api";
 import { useRouter } from "next/navigation";
+import { useInstitutionStore } from "@/lib/institutionStore";
 
 interface NavItem {
   label: string;
@@ -20,6 +22,7 @@ interface NavItem {
   icon: React.ElementType;
   permission?: string;
   roles?: string[];
+  curriculum?: "844" | "cbc"; // omit = shown for both
 }
 
 const allNavItems: NavItem[] = [
@@ -27,7 +30,7 @@ const allNavItems: NavItem[] = [
   { label: "Students",       href: "/students",        icon: Users,          permission: "students:read" },
   { label: "Admissions",     href: "/admissions",      icon: UserCheck,      permission: "students:write" },
   { label: "Academics",      href: "/academics",       icon: BookOpen,       permission: "attendance:read" },
-  { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write" },
+  { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
   { label: "Finance",        href: "/finance",         icon: DollarSign,     permission: "fees:read" },
   { label: "Staff",          href: "/staff",           icon: GraduationCap,  permission: "staff:read" },
   { label: "Communications", href: "/communications",  icon: MessageSquare,  permission: "announcements:read" },
@@ -51,8 +54,8 @@ const parentNavItems: NavItem[] = [
 const teacherNavItems: NavItem[] = [
   { label: "Dashboard",    href: "/teacher",            icon: LayoutDashboard },
   { label: "Attendance",   href: "/teacher/attendance", icon: UserCheck },
-  { label: "Grades",       href: "/teacher/grades",     icon: BookOpen },
-  { label: "Report Cards", href: "/academics/report-cards", icon: FileText },
+  { label: "Grades",       href: "/teacher/grades",     icon: BookOpen, curriculum: "844" },
+  { label: "Report Cards", href: "/academics/report-cards", icon: FileText, curriculum: "844" },
   { label: "Assignments",  href: "/teacher/assignments",icon: FileText },
   { label: "Messages",     href: "/teacher/messages",   icon: MessageSquare },
 ];
@@ -77,11 +80,17 @@ export function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const pathname = usePathname();
   const { user, hasPermission, hasRole, clearAuth } = useAuthStore();
+  const { context, fetchContext, clearContext } = useInstitutionStore();
   const router = useRouter();
+
+  useEffect(() => {
+    if (user) fetchContext();
+  }, [user, fetchContext]);
 
   const navItems = user ? getNavItems(user.role) : allNavItems;
 
   const visibleItems = navItems.filter((item) => {
+    if (item.curriculum && context && item.curriculum !== context.curriculum_type) return false;
     if (item.roles && user) return item.roles.includes(user.role);
     if (item.permission) return hasPermission(item.permission);
     return true;
@@ -90,6 +99,7 @@ export function Sidebar() {
   const handleLogout = async () => {
     try { await authAPI.logout(); } catch (_) {}
     clearAuth();
+    clearContext();
     router.push("/login");
   };
 
