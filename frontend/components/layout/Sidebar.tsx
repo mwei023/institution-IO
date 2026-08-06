@@ -31,6 +31,7 @@ const allNavItems: NavItem[] = [
   { label: "Admissions",     href: "/admissions",      icon: UserCheck,      permission: "students:write" },
   { label: "Academics",      href: "/academics",       icon: BookOpen,       permission: "attendance:read" },
   { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
+  { label: "Report Cards",   href: "/academics/cbc-report-cards", icon: FileText, permission: "grades:write", curriculum: "cbc" },
   { label: "Finance",        href: "/finance",         icon: DollarSign,     permission: "fees:read" },
   { label: "Staff",          href: "/staff",           icon: GraduationCap,  permission: "staff:read" },
   { label: "Communications", href: "/communications",  icon: MessageSquare,  permission: "announcements:read" },
