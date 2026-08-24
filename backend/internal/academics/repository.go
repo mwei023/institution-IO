@@ -18,7 +18,8 @@ var (
 	ErrSessionNotFound = errors.New("attendance session not found")
 	ErrSessionLocked   = errors.New("attendance session is locked")
 	ErrReportCardNotFound = errors.New("report card not found")
-	ErrReportCardPublished = errors.New("report card already published — unpublish before regenerating")  
+	ErrReportCardPublished = errors.New("report card already published — unpublish before regenerating")
+	ErrGradeComponentNotFound = errors.New("grade component not found")  
 )
 
 // Repository handles database access for the academics domain.
@@ -212,10 +213,10 @@ func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, 
 
 // ─── Attendance ───────────────────────────────────────────────────
 
-func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, classID, teacherID uuid.UUID, sessionDate time.Time, sessionType string) (*AttendanceSession, error) {
+func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, classID, teacherID uuid.UUID, sessionDate time.Time, sessionType string, periodID *uuid.UUID) (*AttendanceSession, error) {
 	var session AttendanceSession
 	err := r.db.QueryRow(ctx, `
-		SELECT s.id, s.institution_id, s.class_id, c.name, s.teacher_id,
+		SELECT s.id, s.institution_id, s.class_id, c.name, s.teacher_id, s.period_id,
 		       s.session_date, s.session_type, s.status, s.submitted_at, s.created_at
 		FROM attendance_sessions s
 		JOIN classes c ON c.id = s.class_id
@@ -223,10 +224,10 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 		  AND s.class_id = $2
 		  AND s.session_date = $3
 		  AND s.session_type = $4
-		  AND s.period_id IS NULL`,
-		institutionID, classID, sessionDate, sessionType,
+		  AND s.period_id IS NOT DISTINCT FROM $5`,
+		institutionID, classID, sessionDate, sessionType, periodID,
 	).Scan(
-		&session.ID, &session.InstitutionID, &session.ClassID, &session.ClassName, &session.TeacherID,
+		&session.ID, &session.InstitutionID, &session.ClassID, &session.ClassName, &session.TeacherID, &session.PeriodID,
 		&session.SessionDate, &session.SessionType, &session.Status, &session.SubmittedAt, &session.CreatedAt,
 	)
 
@@ -240,9 +241,9 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 	newID := uuid.New()
 	_, err = r.db.Exec(ctx, `
 		INSERT INTO attendance_sessions
-			(id, institution_id, class_id, teacher_id, session_date, session_type, status, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,'open',NOW())`,
-		newID, institutionID, classID, teacherID, sessionDate, sessionType,
+			(id, institution_id, class_id, teacher_id, period_id, session_date, session_type, status, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'open',NOW())`,
+		newID, institutionID, classID, teacherID, periodID, sessionDate, sessionType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -259,6 +260,7 @@ func (r *Repository) GetOrCreateSession(ctx context.Context, institutionID, clas
 		ClassID:       classID,
 		ClassName:     className,
 		TeacherID:     teacherID,
+		PeriodID:      periodID,
 		SessionDate:   sessionDate,
 		SessionType:   sessionType,
 		Status:        "open",
@@ -417,6 +419,49 @@ func (r *Repository) ListGradeComponents(ctx context.Context, institutionID, cla
 		components = append(components, &gc)
 	}
 	return components, rows.Err()
+}
+
+// GetGradeComponentByID returns the class, subject, and term a grade
+// component belongs to, so callers can authorize a teacher against it.
+func (r *Repository) GetGradeComponentByID(ctx context.Context, institutionID, componentID uuid.UUID) (*GradeComponent, error) {
+	var gc GradeComponent
+	err := r.db.QueryRow(ctx, `
+		SELECT id, institution_id, class_id, subject_id, term_id, name, weight, max_marks
+		FROM grade_components
+		WHERE institution_id = $1 AND id = $2`,
+		institutionID, componentID,
+	).Scan(&gc.ID, &gc.InstitutionID, &gc.ClassID, &gc.SubjectID, &gc.TermID, &gc.Name, &gc.Weight, &gc.MaxMarks)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrGradeComponentNotFound
+		}
+		return nil, err
+	}
+	return &gc, nil
+}
+
+// TeacherIsTimetabledForSubjectInClass checks whether a teacher has at
+// least one timetable_periods row for this exact class+subject+term.
+// 8-4-4 has no dedicated teacher-subject assignment table (known issue
+// #9) — this derives authorization from what's actually scheduled,
+// which is more correct than a separately maintained list that could
+// drift from the real timetable.
+func (r *Repository) TeacherIsTimetabledForSubjectInClass(ctx context.Context, institutionID, teacherID, classID, subjectID, termID uuid.UUID) (bool, error) {
+	var count int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM timetable_periods
+		WHERE institution_id = $1
+		  AND teacher_id = $2
+		  AND class_id = $3
+		  AND subject_id = $4
+		  AND term_id = $5
+		  AND deleted_at IS NULL`,
+		institutionID, teacherID, classID, subjectID, termID,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check timetable assignment: %w", err)
+	}
+	return count > 0, nil
 }
 
 func (r *Repository) GetGradebook(ctx context.Context, institutionID, componentID uuid.UUID) ([]*GradeEntry, error) {
@@ -1025,4 +1070,93 @@ func (r *Repository) ListTerms(ctx context.Context, institutionID uuid.UUID) ([]
 		terms = append(terms, &t)
 	}
 	return terms, rows.Err()
+}
+
+func (r *Repository) CreateClass(ctx context.Context, institutionID uuid.UUID, req *CreateClassRequest) (*Class, error) {
+	cl := &Class{
+		ID: uuid.New(), InstitutionID: institutionID, AcademicYearID: req.AcademicYearID,
+		Name: req.Name, Stream: req.Stream, Level: req.Level,
+		Capacity: req.Capacity, ClassTeacherID: req.ClassTeacherID,
+	}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO classes (id, institution_id, academic_year_id, name, stream, level, capacity, class_teacher_id, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+		RETURNING created_at`,
+		cl.ID, cl.InstitutionID, cl.AcademicYearID, cl.Name, cl.Stream, cl.Level, cl.Capacity, cl.ClassTeacherID,
+	).Scan(&cl.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create class: %w", err)
+	}
+	return cl, nil
+}
+
+// AssignClassTeacher is deliberately a separate, auditable action from
+// CreateClass — matches the lifecycle where a class may be created
+// before a teacher is assigned, and reassignment happens as its own
+// admin decision later, not as a side effect of a generic "edit class" call.
+func (r *Repository) AssignClassTeacher(ctx context.Context, institutionID, classID, teacherID uuid.UUID) error {
+	cmd, err := r.db.Exec(ctx, `
+		UPDATE classes SET class_teacher_id = $3
+		WHERE institution_id = $1 AND id = $2 AND deleted_at IS NULL`,
+		institutionID, classID, teacherID,
+	)
+	if err != nil {
+		return fmt.Errorf("assign class teacher: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrClassNotFound
+	}
+	return nil
+}
+
+// ListTeachers is a narrow, single-purpose lookup for the class-teacher
+// assignment dropdown — NOT a Staff module endpoint. It exists only to
+// answer "which users have the teacher role", nothing more.
+func (r *Repository) ListTeachers(ctx context.Context, institutionID uuid.UUID) ([]*TeacherOption, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT u.id, u.first_name || ' ' || u.last_name
+		FROM users u
+		JOIN roles ro ON ro.id = u.role_id
+		WHERE u.institution_id = $1 AND ro.slug = 'teacher' AND u.is_active = true
+		ORDER BY u.first_name, u.last_name`,
+		institutionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list teachers: %w", err)
+	}
+	defer rows.Close()
+
+	teachers := []*TeacherOption{}
+	for rows.Next() {
+		var t TeacherOption
+		if err := rows.Scan(&t.ID, &t.FullName); err != nil {
+			return nil, err
+		}
+		teachers = append(teachers, &t)
+	}
+	return teachers, rows.Err()
+}
+
+func (r *Repository) ListAcademicYears(ctx context.Context, institutionID uuid.UUID) ([]*AcademicYear, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, institution_id, name, start_date, end_date, is_current
+		FROM academic_years
+		WHERE institution_id = $1
+		ORDER BY start_date DESC`,
+		institutionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list academic years: %w", err)
+	}
+	defer rows.Close()
+
+	years := []*AcademicYear{}
+	for rows.Next() {
+		var ay AcademicYear
+		if err := rows.Scan(&ay.ID, &ay.InstitutionID, &ay.Name, &ay.StartDate, &ay.EndDate, &ay.IsCurrent); err != nil {
+			return nil, err
+		}
+		years = append(years, &ay)
+	}
+	return years, rows.Err()
 }

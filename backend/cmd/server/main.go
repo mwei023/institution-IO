@@ -73,7 +73,7 @@ func main() {
 
 	financeRepo := finance.NewRepository(dbPool)
 	mpesaClient := finmpesa.NewClient(cfg)
-	financeSvc := finance.NewService(financeRepo, mpesaClient, publisher)
+	financeSvc := finance.NewService(financeRepo, mpesaClient, publisher, cfg.MpesaCallbackURL)
 
 	academicsRepo := academics.NewRepository(dbPool)
 	academicsSvc := academics.NewService(academicsRepo, publisher)
@@ -141,7 +141,7 @@ func main() {
 
 	// M-Pesa callback (no auth — Safaricom server)
 	r.Post("/api/v1/finance/mpesa/callback", financeHandler.MpesaCallback)
-	r.Post("/api/v1/finance/mpesa/callback/{institution_slug}", financeHandler.MpesaCallback)
+	//r.Post("/api/v1/finance/mpesa/callback/{institution_slug}", financeHandler.MpesaCallback)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public auth
@@ -182,7 +182,7 @@ func main() {
 				r.With(auth.RequirePermission("fees:read")).Get("/students/{id}/payments", financeHandler.GetPaymentHistory)
 				r.With(auth.RequirePermission("fees:read")).Get("/summary", financeHandler.GetFeeCollectionSummary)
 				r.With(auth.RequirePermission("fees:read")).Get("/outstanding", financeHandler.GetOutstandingBalances)
-				r.Post("/pay/stk-push", financeHandler.InitiateSTKPush)
+				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/stk-push", financeHandler.InitiateSTKPush)
 				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/manual", financeHandler.RecordManualPayment)
 			})
 
@@ -206,6 +206,10 @@ func main() {
 				r.With(auth.RequirePermission("grades:write")).Post("/report-cards/generate-class", academicsHandler.GenerateReportCardsForClass)
 				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/publish", academicsHandler.PublishReportCard)
 				r.With(auth.RequirePermission("grades:publish")).Post("/report-cards/unpublish", academicsHandler.UnpublishReportCard)
+				r.With(auth.RequirePermission("classes:write")).Post("/classes", academicsHandler.CreateClass)
+				r.With(auth.RequirePermission("classes:write")).Post("/classes/{id}/assign-teacher", academicsHandler.AssignClassTeacher)
+				r.With(auth.RequirePermission("classes:write")).Get("/teachers", academicsHandler.ListTeachers)
+				r.With(auth.RequirePermission("classes:write")).Get("/academic-years", academicsHandler.ListAcademicYears)
 			})
 
 			// CBC v1.0 academic layer — separate route group, separate

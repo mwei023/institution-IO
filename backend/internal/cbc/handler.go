@@ -92,13 +92,20 @@ func (h *Handler) GetComponents(w http.ResponseWriter, r *http.Request) {
 // GetEntries handles GET /api/v1/cbc/entries?component_id=
 func (h *Handler) GetEntries(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
+	teacherID, _ := uuid.Parse(claims.UserID)
+
 	componentID, err := uuid.Parse(r.URL.Query().Get("component_id"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_COMPONENT_ID", "Valid component_id is required")
 		return
 	}
-	entries, err := h.svc.GetEntries(r.Context(), institutionID, componentID)
+	entries, err := h.svc.GetEntries(r.Context(), institutionID, teacherID, claims.Role == "teacher", componentID)
 	if err != nil {
+		if errors.Is(err, ErrNotAssignedToLearningArea) {
+			response.Error(w, http.StatusForbidden, "NOT_ASSIGNED", "You are not assigned to teach this learning area for this class")
+			return
+		}
 		response.InternalError(w)
 		return
 	}
@@ -117,6 +124,10 @@ func (h *Handler) SaveEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.SaveEntries(r.Context(), institutionID, teacherID, &req); err != nil {
+		if errors.Is(err, ErrNotAssignedToLearningArea) {
+			response.Error(w, http.StatusForbidden, "NOT_ASSIGNED", "You are not assigned to teach this learning area for this class")
+			return
+		}
 		log.Error().Err(err).Msg("save cbc entries")
 		response.Error(w, http.StatusBadRequest, "ENTRIES_ERROR", err.Error())
 		return

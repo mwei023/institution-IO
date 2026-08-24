@@ -262,5 +262,8 @@ func (r *Repository) GetMessages(ctx context.Context, institutionID, userID, oth
 		institutionID, otherUserID, userID,
 	)
 
-	return messages, fmt.Errorf("%w", rows.Err())
+	if err := rows.Err(); err != nil {
+    return nil, fmt.Errorf("iterate messages: %w", err)
+}
+return messages, nil
 }

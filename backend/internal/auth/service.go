@@ -1,9 +1,13 @@
 package auth
 
 import (
-	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"context"
+	//"crypto/rand"
+	//"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -157,7 +161,7 @@ func (s *Service) issueTokens(ctx context.Context, user *User, userAgent, ipAddr
 		return nil, fmt.Errorf("generate access token: %w", err)
 	}
 
-	_, tokenHash, err := s.generateRefreshToken()
+	refreshToken, tokenHash, err := s.generateRefreshToken()
 	if err != nil {
 		return nil, fmt.Errorf("generate refresh token: %w", err)
 	}
@@ -184,8 +188,13 @@ func (s *Service) issueTokens(ctx context.Context, user *User, userAgent, ipAddr
 		ExpiresIn:          int(s.cfg.JWTAccessTTL.Seconds()),
 		MustChangePassword: user.MustChangePassword,
 		User:               profile,
-		// RefreshToken is returned separately via cookie in the handler
+		RefreshToken:       refreshToken,
 	}, nil
+}
+
+func hashRefreshToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
 // jwtClaims is the JWT payload struct.
@@ -222,12 +231,14 @@ func (s *Service) generateRefreshToken() (token, hash string, err error) {
 		return "", "", err
 	}
 	token = base64.URLEncoding.EncodeToString(b)
-	// Hash for storage (bcrypt is too slow for refresh tokens; use a simple sha256)
-	hashBytes, err := bcrypt.GenerateFromPassword([]byte(token), 10)
-	if err != nil {
-		return "", "", err
-	}
-	return token, string(hashBytes), nil
+	// Refresh tokens are already 256 bits of randomness — bcrypt's salting is
+	// for low-entropy secrets like passwords and actively breaks lookup here
+	// (bcrypt is non-deterministic; you can't recompute the same hash to find
+	// the row by exact match). SHA-256 is the correct, standard choice for
+	// hashing an already-high-entropy token.
+	sum := sha256.Sum256([]byte(token))
+	hash = hex.EncodeToString(sum[:])
+	return token, hash, nil
 }
 
 func (s *Service) generateMFAToken(userID uuid.UUID) (string, error) {
@@ -325,4 +336,35 @@ func HashPassword(password string) (string, error) {
 		return "", err
 	}
 	return string(hash), nil
+}
+
+func (s *Service) RefreshToken(ctx context.Context, rawToken, userAgent, ipAddress string) (*LoginResponse, error) {
+	if rawToken == "" {
+		return nil, ErrInvalidToken
+	}
+	hash := hashRefreshToken(rawToken)
+
+	userID, institutionID, expiresAt, err := s.repo.GetRefreshToken(ctx, hash)
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+	if expiresAt.Before(time.Now()) {
+		_ = s.repo.RevokeRefreshToken(ctx, hash)
+		return nil, ErrTokenExpired
+	}
+
+	user, err := s.repo.GetUserByID(ctx, *institutionID, *userID)
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+	if !user.IsActive {
+		return nil, ErrAccountInactive
+	}
+
+	// Rotate: invalidate the presented token before issuing a new one.
+	if err := s.repo.RevokeRefreshToken(ctx, hash); err != nil {
+		return nil, fmt.Errorf("revoke old refresh token: %w", err)
+	}
+
+	return s.issueTokens(ctx, user, userAgent, ipAddress)
 }

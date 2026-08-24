@@ -64,25 +64,68 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.setRefreshCookie(w, resp.RefreshToken)
 	response.Ok(w, resp)
 }
 
+
 // RefreshToken handles POST /api/v1/auth/refresh
 func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
-	response.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Token refresh not yet implemented")
+	cookie, err := r.Cookie("refresh_token")
+	if err != nil || cookie.Value == "" {
+		response.Error(w, http.StatusUnauthorized, "NO_REFRESH_TOKEN", "No refresh token provided")
+		return
+	}
+
+	resp, err := h.svc.RefreshToken(r.Context(), cookie.Value, r.UserAgent(), r.RemoteAddr)
+	if err != nil {
+		h.clearRefreshCookie(w)
+		switch {
+		case errors.Is(err, ErrTokenExpired), errors.Is(err, ErrInvalidToken):
+			response.Error(w, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Session expired, please log in again")
+		case errors.Is(err, ErrAccountInactive):
+			response.Error(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "Your account has been deactivated")
+		default:
+			log.Error().Err(err).Msg("refresh token error")
+			response.InternalError(w)
+		}
+		return
+	}
+
+	h.setRefreshCookie(w, resp.RefreshToken)
+	response.Ok(w, resp)
 }
 
-// Logout handles POST /api/v1/auth/logout
-func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) setRefreshCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    token,
+		Path:     "/api/v1/auth",
+		Expires:  time.Now().Add(h.svc.cfg.JWTRefreshTTL),
+		HttpOnly: true,
+		Secure:   h.svc.cfg.IsProduction(), // allow http:// in local dev
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (h *Handler) clearRefreshCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    "",
 		Path:     "/api/v1/auth",
 		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   h.svc.cfg.IsProduction(),
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+// Logout handles POST /api/v1/auth/logout
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie("refresh_token"); err == nil && cookie.Value != "" {
+		_ = h.svc.repo.RevokeRefreshToken(r.Context(), hashRefreshToken(cookie.Value))
+	}
+	h.clearRefreshCookie(w)
 	response.NoContent(w)
 }
 
@@ -113,6 +156,7 @@ func (h *Handler) VerifyMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.setRefreshCookie(w, resp.RefreshToken)
 	response.Ok(w, resp)
 }
 
@@ -163,3 +207,5 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	response.NoContent(w)
 }
+
+

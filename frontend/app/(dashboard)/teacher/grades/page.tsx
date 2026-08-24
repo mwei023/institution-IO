@@ -58,21 +58,24 @@ export default function TeacherGradesPage() {
   const [error, setError] = useState<string | null>(null);
 
   // Load classes, subjects, current term on mount
- Promise.all([
-  academicsAPI.listClasses(),
-  academicsAPI.listSubjects(),
-  academicsAPI.listTerms(),
-])
-  .then(([clRes, subRes, termRes]) => {
-    setClasses(clRes.data?.data ?? []);
-    setSubjects(subRes.data?.data ?? []);
-    const termList = termRes.data?.data ?? [];
-    setTerms(termList);
-    const current = termList.find((t: any) => t.is_current);
-    if (current) setSelectedTerm(current.id);
-  })
-  .catch(() => setError("Could not load classes, subjects, and terms."))
-  .finally(() => setSelectLoading(false));
+ useEffect(() => {
+  // Load classes, subjects, current term on mount
+  Promise.all([
+    academicsAPI.listClasses(),
+    academicsAPI.listSubjects(),
+    academicsAPI.listTerms(),
+  ])
+    .then(([clRes, subRes, termRes]) => {
+      setClasses(clRes.data?.data ?? []);
+      setSubjects(subRes.data?.data ?? []);
+      const termList = termRes.data?.data ?? [];
+      setTerms(termList);
+      const current = termList.find((t: any) => t.is_current);
+      if (current) setSelectedTerm(current.id);
+    })
+    .catch(() => setError("Could not load classes, subjects, and terms."))
+    .finally(() => setSelectLoading(false));
+}, []);
 
   // Load components when class+subject+term all selected
   const loadComponents = useCallback(() => {

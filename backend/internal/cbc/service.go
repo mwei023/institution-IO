@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -55,14 +56,42 @@ func (s *Service) ListComponents(ctx context.Context, institutionID, classID, le
 	return s.repo.ListComponents(ctx, institutionID, classID, learningAreaID, termID)
 }
 
-func (s *Service) GetEntries(ctx context.Context, institutionID, componentID uuid.UUID) ([]*Entry, error) {
+func (s *Service) GetEntries(ctx context.Context, institutionID, teacherID uuid.UUID, isTeacherRole bool, componentID uuid.UUID) ([]*Entry, error) {
+	if isTeacherRole {
+		classID, err := s.repo.GetComponentClassID(ctx, institutionID, componentID)
+		if err != nil {
+			return nil, err
+		}
+		assigned, err := s.repo.TeacherHasLearningAreaAssignment(ctx, institutionID, teacherID, classID)
+		if err != nil {
+			return nil, err
+		}
+		if !assigned {
+			return nil, ErrNotAssignedToLearningArea
+		}
+	}
 	return s.repo.GetEntries(ctx, institutionID, componentID)
 }
+
+var ErrNotAssignedToLearningArea = errors.New("teacher is not assigned to this learning area for this class")
 
 func (s *Service) SaveEntries(ctx context.Context, institutionID, teacherID uuid.UUID, req *BulkEntryRequest) error {
 	if len(req.Entries) == 0 {
 		return fmt.Errorf("no entries provided")
 	}
+
+	classID, err := s.repo.GetComponentClassID(ctx, institutionID, req.ComponentID)
+	if err != nil {
+		return err
+	}
+	assigned, err := s.repo.TeacherHasLearningAreaAssignment(ctx, institutionID, teacherID, classID)
+	if err != nil {
+		return err
+	}
+	if !assigned {
+		return ErrNotAssignedToLearningArea
+	}
+
 	return s.repo.SaveEntries(ctx, institutionID, req.ComponentID, teacherID, req.Entries)
 }
 
@@ -120,6 +149,11 @@ func (s *Service) GenerateReportCardsForClass(ctx context.Context, institutionID
 	studentIDs, err := s.academicsRepo.GetActiveStudentIDsForClass(ctx, institutionID, classID)
 	if err != nil {
 		return nil, fmt.Errorf("get class roster: %w", err)
+	}
+	
+	studentNames, err := s.repo.GetStudentNames(ctx, institutionID, studentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get student names: %w", err)
 	}
 
 	bands, err := s.repo.GetRatingBands(ctx, institutionID, curriculumType, gradeBand)
@@ -240,6 +274,7 @@ func (s *Service) GenerateReportCardsForClass(ctx context.Context, institutionID
 
 		rc := &ReportCard{
 			StudentID:             c.studentID,
+			StudentName:           studentNames[c.studentID],
 			TotalPoints:           &totalPointsVal,
 			MeanPoints:            &meanPoints,
 			ClassPosition:         &rank,

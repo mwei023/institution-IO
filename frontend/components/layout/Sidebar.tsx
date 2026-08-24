@@ -4,78 +4,14 @@ import React, { useState, useEffect} from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  LayoutDashboard, Users, GraduationCap, BookOpen, DollarSign,
-  MessageSquare, Settings, LogOut, ChevronLeft, ChevronRight,
-  FileText, Bell, Shield, Home, Stethoscope, Bus, Library,
-  Package, Building2, UserCheck, Menu, X,
-} from "lucide-react";
+import { LogOut, ChevronLeft, ChevronRight, Menu, X, GraduationCap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
 import { authAPI } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { useInstitutionStore } from "@/lib/institutionStore";
+import { getNavItems, allNavItems } from "@/lib/access";
 
-interface NavItem {
-  label: string;
-  href: string;
-  icon: React.ElementType;
-  permission?: string;
-  roles?: string[];
-  curriculum?: "844" | "cbc"; // omit = shown for both
-}
-
-const allNavItems: NavItem[] = [
-  { label: "Dashboard",      href: "/principal",       icon: LayoutDashboard },
-  { label: "Students",       href: "/students",        icon: Users,          permission: "students:read" },
-  { label: "Admissions",     href: "/admissions",      icon: UserCheck,      permission: "students:write" },
-  { label: "Academics",      href: "/academics",       icon: BookOpen,       permission: "attendance:read" },
-  { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
-  { label: "Report Cards",   href: "/academics/cbc-report-cards", icon: FileText, permission: "grades:write", curriculum: "cbc" },
-  { label: "Finance",        href: "/finance",         icon: DollarSign,     permission: "fees:read" },
-  { label: "Staff",          href: "/staff",           icon: GraduationCap,  permission: "staff:read" },
-  { label: "Communications", href: "/communications",  icon: MessageSquare,  permission: "announcements:read" },
-  { label: "Documents",      href: "/documents",       icon: FileText,       permission: "documents:read" },
-  { label: "Clinic",         href: "/clinic",          icon: Stethoscope,    roles: ["nurse", "super_admin"] },
-  { label: "Library",        href: "/library",         icon: Library,        roles: ["librarian", "super_admin"] },
-  { label: "Transport",      href: "/transport",       icon: Bus,            roles: ["driver", "super_admin"] },
-  { label: "Inventory",      href: "/inventory",       icon: Package,        roles: ["storekeeper", "super_admin"] },
-  { label: "Boarding",       href: "/boarding",        icon: Building2,      roles: ["super_admin"] },
-  { label: "Security",       href: "/security",        icon: Shield,         roles: ["security_officer", "super_admin"] },
-  { label: "Settings",       href: "/settings",        icon: Settings,       permission: "settings:read" },
-];
-
-const parentNavItems: NavItem[] = [
-  { label: "Dashboard",    href: "/parent",   icon: Home },
-  { label: "Fees",         href: "/parent/fees",     icon: DollarSign },
-  { label: "Messages",     href: "/parent/messages", icon: MessageSquare },
-  { label: "Announcements",href: "/parent/announcements", icon: Bell },
-];
-
-const teacherNavItems: NavItem[] = [
-  { label: "Dashboard",    href: "/teacher",            icon: LayoutDashboard },
-  { label: "Attendance",   href: "/teacher/attendance", icon: UserCheck },
-  { label: "Grades",       href: "/teacher/grades",     icon: BookOpen, curriculum: "844" },
-  { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
-  { label: "Report Cards",   href: "/academics/cbc-report-cards", icon: FileText, permission: "grades:write", curriculum: "cbc" },
-  { label: "Assignments",  href: "/teacher/assignments",icon: FileText },
-  { label: "Messages",     href: "/teacher/messages",   icon: MessageSquare },
-];
-
-const studentNavItems: NavItem[] = [
-  { label: "Dashboard",   href: "/student",            icon: Home },
-  { label: "Timetable",   href: "/student/timetable",  icon: BookOpen },
-  { label: "Results",     href: "/student/results",    icon: GraduationCap },
-  { label: "Library",     href: "/student/library",    icon: Library },
-  { label: "Fees",        href: "/student/fees",       icon: DollarSign },
-];
-
-function getNavItems(role: string) {
-  if (role === "parent") return parentNavItems;
-  if (role === "teacher") return teacherNavItems;
-  if (role === "student") return studentNavItems;
-  return allNavItems;
-}
 
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);

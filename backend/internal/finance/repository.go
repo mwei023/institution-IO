@@ -17,6 +17,7 @@ import (
 var (
 	ErrInvoiceNotFound  = errors.New("invoice not found")
 	ErrPaymentNotFound  = errors.New("payment not found")
+	ErrStudentNotFound   = errors.New("student not found")
 	ErrDuplicateMpesaTx = errors.New("M-Pesa transaction already processed")
 )
 
@@ -70,7 +71,7 @@ func (r *Repository) GetStudentFeeAccount(ctx context.Context, institutionID, st
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("student not found")
+			return nil, ErrStudentNotFound
 		}
 		return nil, fmt.Errorf("get fee account: %w", err)
 	}
@@ -195,18 +196,21 @@ func (r *Repository) GetNextReceiptNumber(ctx context.Context, institutionID uui
 }
 
 // StoreMpesaTransaction saves a raw Daraja callback.
+// StoreMpesaTransaction saves a raw Daraja callback.
 func (r *Repository) StoreMpesaTransaction(ctx context.Context, institutionID uuid.UUID, tx *MpesaTransaction, rawPayload []byte) error {
 	var receiptNum interface{} = tx.MpesaReceiptNumber
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO mpesa_transactions (
 			id, institution_id, checkout_request_id, mpesa_receipt_number,
 			amount, phone_number, account_reference,
-			result_code, result_description, raw_payload, processed, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,NOW())
+			result_code, result_description, raw_payload, processed,
+			stk_request_id, channel_id, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,$11,$12,NOW())
 		ON CONFLICT (institution_id, mpesa_receipt_number) DO NOTHING`,
 		tx.ID, institutionID, tx.CheckoutRequestID, receiptNum,
 		tx.Amount, tx.PhoneNumber, tx.AccountReference,
 		tx.ResultCode, tx.ResultDescription, rawPayload,
+		tx.StkRequestID, tx.ChannelID,
 	)
 	return err
 }
@@ -220,7 +224,7 @@ func (r *Repository) GetStudentByAdmissionNumber(ctx context.Context, institutio
 	).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("student not found for admission number: " + admissionNumber)
+			return nil, errors.New("student not found")
 		}
 		return nil, err
 	}

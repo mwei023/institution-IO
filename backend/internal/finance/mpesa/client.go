@@ -46,10 +46,19 @@ type tokenResponse struct {
 }
 
 // GetAccessToken fetches a Daraja OAuth access token.
-func (c *Client) GetAccessToken(ctx context.Context) (string, error) {
-	creds := base64.StdEncoding.EncodeToString(
-		[]byte(c.cfg.MpesaConsumerKey + ":" + c.cfg.MpesaConsumerSecret),
-	)
+// ChannelCredentials holds the Daraja credentials for one payment_channels row.
+// Passed in per-call instead of read from global config, since an institution
+// may have more than one till/paybill.
+type ChannelCredentials struct {
+	ConsumerKey    string
+	ConsumerSecret string
+	Shortcode      string
+	Passkey        string
+}
+
+// GetAccessToken fetches a Daraja OAuth access token for the given credentials.
+func (c *Client) GetAccessToken(ctx context.Context, consumerKey, consumerSecret string) (string, error) {
+	creds := base64.StdEncoding.EncodeToString([]byte(consumerKey + ":" + consumerSecret))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/oauth/v1/generate?grant_type=client_credentials", nil)
@@ -68,8 +77,78 @@ func (c *Client) GetAccessToken(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
 		return "", fmt.Errorf("daraja auth decode: %w", err)
 	}
-
 	return tr.AccessToken, nil
+}
+
+// InitiateSTKPush sends an STK push using the given channel's credentials.
+// If ConsumerKey is empty, this is a channel with no live Daraja credentials
+// configured yet (e.g. a bank_account-only institution during onboarding) —
+// stub mode, same as before.
+func (c *Client) InitiateSTKPush(ctx context.Context, creds ChannelCredentials, callbackURL, phone, accountRef string, amount int64) (*STKPushResponse, error) {
+	if creds.ConsumerKey == "" {
+		log.Info().
+			Str("phone", phone).
+			Str("account_ref", accountRef).
+			Str("shortcode", creds.Shortcode).
+			Int64("amount", amount).
+			Msg("MPESA_STUB: would send STK push")
+		return &STKPushResponse{
+			MerchantRequestID: "stub-merchant-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+			CheckoutRequestID: "stub-checkout-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+			ResponseCode:      "0",
+			CustomerMessage:   "Success. Request accepted for processing",
+		}, nil
+	}
+
+	token, err := c.GetAccessToken(ctx, creds.ConsumerKey, creds.ConsumerSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp := time.Now().Format("20060102150405")
+	password := base64.StdEncoding.EncodeToString(
+		[]byte(creds.Shortcode + creds.Passkey + timestamp),
+	)
+
+	payload := STKPushRequest{
+		BusinessShortCode: creds.Shortcode,
+		Password:          password,
+		Timestamp:         timestamp,
+		TransactionType:   "CustomerPayBillOnline",
+		Amount:            amount,
+		PartyA:            phone,
+		PartyB:            creds.Shortcode,
+		PhoneNumber:       phone,
+		CallBackURL:       callbackURL,
+		AccountReference:  accountRef,
+		TransactionDesc:   "School fee payment",
+	}
+
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/mpesa/stkpush/v1/processrequest", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("stk push request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("daraja STK push failed: %s — %s", resp.Status, string(respBody))
+	}
+
+	var stkResp STKPushResponse
+	if err := json.Unmarshal(respBody, &stkResp); err != nil {
+		return nil, fmt.Errorf("decode STK push response: %w", err)
+	}
+	return &stkResp, nil
 }
 
 // STKPushRequest is the Daraja STK Push API request body.
@@ -98,73 +177,5 @@ type STKPushResponse struct {
 
 // InitiateSTKPush sends an STK push request to the Daraja API.
 // In sandbox/stub mode with empty credentials, this logs and returns a fake response.
-func (c *Client) InitiateSTKPush(ctx context.Context, phone, accountRef string, amount int64) (*STKPushResponse, error) {
-	// If no credentials configured, return a stub response
-	if c.cfg.MpesaConsumerKey == "" {
-		log.Info().
-			Str("phone", phone).
-			Str("account_ref", accountRef).
-			Int64("amount", amount).
-			Msg("MPESA_STUB: would send STK push")
-		return &STKPushResponse{
-			MerchantRequestID: "stub-merchant-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-			CheckoutRequestID: "stub-checkout-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-			ResponseCode:      "0",
-			CustomerMessage:   "Success. Request accepted for processing",
-		}, nil
-	}
 
-	token, err := c.GetAccessToken(ctx)
-	if err != nil {
-		return nil, err
-	}
 
-	timestamp := time.Now().Format("20060102150405")
-	password := base64.StdEncoding.EncodeToString(
-		[]byte(c.cfg.MpesaShortcode + c.cfg.MpesaPasskey + timestamp),
-	)
-
-	payload := STKPushRequest{
-		BusinessShortCode: c.cfg.MpesaShortcode,
-		Password:          password,
-		Timestamp:         timestamp,
-		TransactionType:   "CustomerPayBillOnline",
-		Amount:            amount,
-		PartyA:            phone,
-		PartyB:            c.cfg.MpesaShortcode,
-		PhoneNumber:       phone,
-		CallBackURL:       c.cfg.MpesaCallbackURL,
-		AccountReference:  accountRef,
-		TransactionDesc:   "School fee payment",
-	}
-
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/mpesa/stkpush/v1/processrequest",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("stk push request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("daraja STK push failed: %s — %s", resp.Status, string(respBody))
-	}
-
-	var stkResp STKPushResponse
-	if err := json.Unmarshal(respBody, &stkResp); err != nil {
-		return nil, fmt.Errorf("decode STK push response: %w", err)
-	}
-
-	return &stkResp, nil
-}

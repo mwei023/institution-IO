@@ -15,6 +15,17 @@ interface ClassOption {
   level: number;
 }
 
+interface TimetablePeriod {
+  id: string;
+  class_id: string;
+  subject_name: string;
+  day_of_week: number;
+  period_number: number;
+  start_time: string;
+  end_time: string;
+  room?: string | null;
+}
+
 interface AttendanceRecordRow {
   id: string;
   student_id: string;
@@ -34,6 +45,7 @@ interface AttendanceSheetResponse {
 }
 
 type AttendanceStatus = "present" | "absent" | "late" | "excused";
+type Mode = "daily" | "period";
 
 const STATUS_OPTIONS: { value: AttendanceStatus; label: string; icon: typeof CheckCircle2 }[] = [
   { value: "present", label: "Present", icon: CheckCircle2 },
@@ -57,10 +69,23 @@ function todayISO(): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function isoDayOfDateString(dateStr: string): number {
+  const d = new Date(dateStr + "T00:00:00");
+  const jsDay = d.getDay();
+  return jsDay === 0 ? 7 : jsDay;
+}
+
 export default function TeacherAttendancePage() {
+  const [mode, setMode] = useState<Mode>("daily");
+
   const [classes, setClasses] = useState<ClassOption[] | null>(null);
   const [classesError, setClassesError] = useState(false);
   const [selectedClassId, setSelectedClassId] = useState<string>("");
+
+  const [myTimetable, setMyTimetable] = useState<TimetablePeriod[] | null>(null);
+  const [timetableError, setTimetableError] = useState(false);
+  const [selectedPeriodId, setSelectedPeriodId] = useState<string>("");
+
   const [sessionDate, setSessionDate] = useState<string>(todayISO());
 
   const [sheet, setSheet] = useState<AttendanceSheetResponse | null>(null);
@@ -79,23 +104,30 @@ export default function TeacherAttendancePage() {
       .listClasses()
       .then((res) => setClasses(res.data?.data ?? []))
       .catch(() => setClassesError(true));
+
+    academicsAPI
+      .getMyTimetable()
+      .then((res) => setMyTimetable(res.data?.data ?? []))
+      .catch(() => setTimetableError(true));
   }, []);
 
-  const loadSheet = useCallback((classId: string, date: string) => {
+  const periodsForDate = (myTimetable ?? [])
+    .filter((p) => p.day_of_week === isoDayOfDateString(sessionDate))
+    .sort((a, b) => a.period_number - b.period_number);
+
+  const selectedPeriod = periodsForDate.find((p) => p.id === selectedPeriodId) ?? null;
+
+  const loadSheet = useCallback((classId: string, date: string, sessionType: Mode, periodId?: string) => {
     if (!classId) return;
+    if (sessionType === "period" && !periodId) return;
     setSheetLoading(true);
     setSheetError(null);
     setSubmitSuccess(false);
     setSubmitError(null);
     academicsAPI
-      .getAttendanceSheet(classId, date)
+      .getAttendanceSheet(classId, date, sessionType, periodId)
       .then((res) => {
         const data: AttendanceSheetResponse = res.data?.data;
-        // Defensive: normalize records to an array regardless of what the
-        // API returns. Backend now always sends "records": [] for empty
-        // classes (see repository.go GetSessionStudents fix), but this
-        // guard costs nothing and protects against any other endpoint
-        // shape that might omit/null the field.
         const safeData: AttendanceSheetResponse = { ...data, records: data?.records ?? [] };
         setSheet(safeData);
         const sMap: Record<string, AttendanceStatus> = {};
@@ -117,12 +149,21 @@ export default function TeacherAttendancePage() {
   }, []);
 
   useEffect(() => {
-    if (selectedClassId) {
-      loadSheet(selectedClassId, sessionDate);
+    if (mode === "daily" && selectedClassId) {
+      loadSheet(selectedClassId, sessionDate, "daily");
+    } else if (mode === "period" && selectedPeriod) {
+      loadSheet(selectedPeriod.class_id, sessionDate, "period", selectedPeriod.id);
     } else {
       setSheet(null);
     }
-  }, [selectedClassId, sessionDate, loadSheet]);
+  }, [mode, selectedClassId, selectedPeriodId, sessionDate, selectedPeriod, loadSheet]);
+
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setSelectedClassId("");
+    setSelectedPeriodId("");
+    setSheet(null);
+  };
 
   const setStatus = (studentId: string, status: AttendanceStatus) => {
     setStatusMap((prev) => ({ ...prev, [studentId]: status }));
@@ -141,6 +182,7 @@ export default function TeacherAttendancePage() {
 
   const handleSubmit = async () => {
     if (!sheet) return;
+    if (mode === "period" && !selectedPeriod) return;
     setSubmitting(true);
     setSubmitError(null);
     setSubmitSuccess(false);
@@ -148,7 +190,8 @@ export default function TeacherAttendancePage() {
       await academicsAPI.submitAttendance({
         class_id: sheet.class_id,
         session_date: sessionDate,
-        session_type: "daily",
+        session_type: mode,
+        period_id: mode === "period" ? selectedPeriod!.id : undefined,
         records: (sheet.records ?? []).map((r) => ({
           student_id: r.student_id,
           status: statusMap[r.student_id] ?? "present",
@@ -156,7 +199,11 @@ export default function TeacherAttendancePage() {
         })),
       });
       setSubmitSuccess(true);
-      loadSheet(sheet.class_id, sessionDate);
+      if (mode === "daily") {
+        loadSheet(sheet.class_id, sessionDate, "daily");
+      } else {
+        loadSheet(sheet.class_id, sessionDate, "period", selectedPeriod!.id);
+      }
     } catch (err: any) {
       setSubmitError(
         err?.response?.data?.error?.message ?? "Could not submit attendance. Please try again."
@@ -173,64 +220,143 @@ export default function TeacherAttendancePage() {
   const excusedCount = Object.values(statusMap).filter((s) => s === "excused").length;
   const records = sheet?.records ?? [];
 
+  const classDisplayName = (classId: string) => {
+    const c = (classes ?? []).find((c) => c.id === classId);
+    return c ? `${c.name}${c.stream ? ` ${c.stream}` : ""}` : "Class";
+  };
+
   return (
     <DashboardLayout title="Take Attendance">
       <div className="space-y-6">
         <div className="page-header">
           <div>
             <h1 className="page-title">Take Attendance</h1>
-            <p className="page-subtitle">Mark daily attendance for your class</p>
+            <p className="page-subtitle">
+              {mode === "daily"
+                ? "Mark daily attendance for your class"
+                : "Mark attendance for one of your own lessons"}
+            </p>
           </div>
         </div>
 
-        <Card>
-          <CardContent className="py-4 flex flex-wrap items-end gap-4">
-            <div className="flex-1 min-w-[220px]">
-              <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wide mb-1.5">
-                Class
-              </label>
-              {classesError ? (
-                <p className="text-sm text-error flex items-center gap-1.5">
-                  <AlertTriangle className="h-3.5 w-3.5" /> Could not load classes
-                </p>
-              ) : (
-                <select
-                  className="w-full h-9 rounded-md border border-neutral-200 bg-white px-3 text-sm text-neutral-800 focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-400"
-                  value={selectedClassId}
-                  onChange={(e) => setSelectedClassId(e.target.value)}
-                >
-                  <option value="">Select a class…</option>
-                  {(classes ?? []).map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}{c.stream ? ` ${c.stream}` : ""}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => switchMode("daily")}
+            className={`flex-1 py-2.5 rounded-lg text-sm font-medium border ${
+              mode === "daily"
+                ? "border-primary-500 bg-primary-50 text-primary-700"
+                : "border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+            }`}
+          >
+            Daily Attendance
+          </button>
+          <button
+            onClick={() => switchMode("period")}
+            className={`flex-1 py-2.5 rounded-lg text-sm font-medium border ${
+              mode === "period"
+                ? "border-primary-500 bg-primary-50 text-primary-700"
+                : "border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+            }`}
+          >
+            My Lessons
+          </button>
+        </div>
 
-            <div className="min-w-[180px]">
-              <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wide mb-1.5">
-                Date
-              </label>
-              <Input
-                type="date"
-                value={sessionDate}
-                max={todayISO()}
-                onChange={(e) => setSessionDate(e.target.value)}
-                className="h-9 text-sm"
-              />
-            </div>
-
-            {sheet && (
-              <div className="text-sm text-neutral-500 pb-2">
-                {sheet.class_name} · {formatDate(sessionDate)}
+        {mode === "daily" ? (
+          <Card>
+            <CardContent className="py-4 flex flex-wrap items-end gap-4">
+              <div className="flex-1 min-w-[220px]">
+                <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wide mb-1.5">
+                  Class
+                </label>
+                {classesError ? (
+                  <p className="text-sm text-error flex items-center gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5" /> Could not load classes
+                  </p>
+                ) : (
+                  <select
+                    className="w-full h-9 rounded-md border border-neutral-200 bg-white px-3 text-sm text-neutral-800 focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-400"
+                    value={selectedClassId}
+                    onChange={(e) => setSelectedClassId(e.target.value)}
+                  >
+                    <option value="">Select a class…</option>
+                    {(classes ?? []).map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}{c.stream ? ` ${c.stream}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
-            )}
-          </CardContent>
-        </Card>
 
-        {!selectedClassId && (
+              <div className="min-w-[180px]">
+                <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wide mb-1.5">
+                  Date
+                </label>
+                <Input
+                  type="date"
+                  value={sessionDate}
+                  max={todayISO()}
+                  onChange={(e) => setSessionDate(e.target.value)}
+                  className="h-9 text-sm"
+                />
+              </div>
+
+              {sheet && (
+                <div className="text-sm text-neutral-500 pb-2">
+                  {sheet.class_name} · {formatDate(sessionDate)}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardContent className="py-4 flex flex-wrap items-end gap-4">
+              <div className="min-w-[180px]">
+                <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wide mb-1.5">
+                  Date
+                </label>
+                <Input
+                  type="date"
+                  value={sessionDate}
+                  max={todayISO()}
+                  onChange={(e) => { setSessionDate(e.target.value); setSelectedPeriodId(""); }}
+                  className="h-9 text-sm"
+                />
+              </div>
+
+              <div className="flex-1 min-w-[280px]">
+                <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wide mb-1.5">
+                  Lesson
+                </label>
+                {timetableError ? (
+                  <p className="text-sm text-error flex items-center gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5" /> Could not load your timetable
+                  </p>
+                ) : periodsForDate.length === 0 ? (
+                  <p className="text-sm text-neutral-500 py-1.5">
+                    You have no lessons scheduled on this date.
+                  </p>
+                ) : (
+                  <select
+                    className="w-full h-9 rounded-md border border-neutral-200 bg-white px-3 text-sm text-neutral-800 focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-400"
+                    value={selectedPeriodId}
+                    onChange={(e) => setSelectedPeriodId(e.target.value)}
+                  >
+                    <option value="">Select a lesson…</option>
+                    {periodsForDate.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.start_time}–{p.end_time} · {p.subject_name} · {classDisplayName(p.class_id)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {mode === "daily" && !selectedClassId && (
           <Card>
             <CardContent className="py-12 text-center text-sm text-neutral-500">
               Select a class above to view its attendance roster.
@@ -238,7 +364,15 @@ export default function TeacherAttendancePage() {
           </Card>
         )}
 
-        {selectedClassId && sheetLoading && (
+        {mode === "period" && !selectedPeriodId && periodsForDate.length > 0 && (
+          <Card>
+            <CardContent className="py-12 text-center text-sm text-neutral-500">
+              Select a lesson above to view its attendance roster.
+            </CardContent>
+          </Card>
+        )}
+
+        {((mode === "daily" && selectedClassId) || (mode === "period" && selectedPeriodId)) && sheetLoading && (
           <Card>
             <CardContent className="py-12 text-center text-sm text-neutral-500 flex items-center justify-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading roster…
@@ -246,7 +380,7 @@ export default function TeacherAttendancePage() {
           </Card>
         )}
 
-        {selectedClassId && !sheetLoading && sheetError && (
+        {((mode === "daily" && selectedClassId) || (mode === "period" && selectedPeriodId)) && !sheetLoading && sheetError && (
           <Card className="border-error/30 bg-error-light/30">
             <CardContent className="py-6 flex items-center gap-2 text-error text-sm">
               <AlertTriangle className="h-4 w-4" /> {sheetError}
@@ -285,7 +419,14 @@ export default function TeacherAttendancePage() {
 
                 <Card>
                   <CardHeader className="flex-row items-center justify-between pb-3">
-                    <CardTitle>{sheet.class_name} Roster</CardTitle>
+                    <CardTitle>
+                      {sheet.class_name} Roster
+                      {mode === "period" && selectedPeriod && (
+                        <span className="text-sm font-normal text-neutral-500 ml-2">
+                          · {selectedPeriod.subject_name}, {selectedPeriod.start_time}–{selectedPeriod.end_time}
+                        </span>
+                      )}
+                    </CardTitle>
                     {!isLocked && (
                       <Button size="sm" variant="outline" onClick={markAllPresent}>
                         Mark all present
@@ -356,7 +497,8 @@ export default function TeacherAttendancePage() {
                 {submitSuccess && (
                   <Card className="border-success/30 bg-success-light/30">
                     <CardContent className="py-3 flex items-center gap-2 text-success-dark text-sm">
-                      <CheckCircle2 className="h-4 w-4" /> Attendance submitted. Parents of absent students have been notified.
+                      <CheckCircle2 className="h-4 w-4" /> Attendance submitted.
+                      {mode === "daily" ? " Parents of absent students have been notified." : ""}
                     </CardContent>
                   </Card>
                 )}

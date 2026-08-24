@@ -120,6 +120,7 @@ type FeeComponent struct {
 	DueDate         *time.Time `json:"due_date,omitempty"`
 }
 
+
 // MpesaTransaction is a raw Daraja API log entry.
 type MpesaTransaction struct {
 	ID                   uuid.UUID  `json:"id"`
@@ -132,4 +133,6 @@ type MpesaTransaction struct {
 	ResultDescription    string     `json:"result_description"`
 	Processed            bool       `json:"processed"`
 	CreatedAt            time.Time  `json:"created_at"`
+	StkRequestID         *uuid.UUID `json:"stk_request_id,omitempty"`
+	ChannelID            *uuid.UUID `json:"channel_id,omitempty"`
 }

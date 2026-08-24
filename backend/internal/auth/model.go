@@ -59,6 +59,7 @@ type LoginResponse struct {
 	MFAToken         string `json:"mfa_token,omitempty"` // short-lived, for MFA flow only
 	MustChangePassword bool  `json:"must_change_password,omitempty"`
 	User             *UserProfile `json:"user,omitempty"`
+	RefreshToken       string `json:"-"`
 }
 
 // UserProfile is the safe user representation (no password hash).

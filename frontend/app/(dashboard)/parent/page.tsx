@@ -22,8 +22,11 @@ interface Child {
   status: string;
 }
 
+// Matches finance.StudentFeeAccount from the backend (model.go) — field is
+// "balance", not "balance_due". balance > 0 means owing, 0 means settled,
+// < 0 means the account is in credit (overpaid).
 interface FeeAccount {
-  balance_due: number;
+  balance: number;
   total_billed: number;
   total_paid: number;
 }
@@ -220,16 +223,26 @@ export default function ParentDashboard() {
               {feeAccount ? (
                 <>
                   <p className={`mt-3 text-2xl font-semibold ${
-                    feeAccount.balance_due > 0 ? "text-error" : "text-success"
+                    feeAccount.balance > 0
+                      ? "text-error"
+                      : feeAccount.balance < 0
+                      ? "text-primary-600"
+                      : "text-success"
                   }`}>
-                    {feeAccount.balance_due > 0
-                      ? formatKES(feeAccount.balance_due)
+                    {feeAccount.balance > 0
+                      ? formatKES(feeAccount.balance)
+                      : feeAccount.balance < 0
+                      ? `${formatKES(Math.abs(feeAccount.balance))} credit`
                       : "Fully Paid"}
                   </p>
-                  {feeAccount.balance_due > 0 ? (
+                  {feeAccount.balance > 0 ? (
                     <Button size="sm" className="mt-3 w-full">
                       Pay Now via M-Pesa
                     </Button>
+                  ) : feeAccount.balance < 0 ? (
+                    <p className="text-xs text-primary-600 mt-1.5">
+                      Overpaid — refunded when your child leaves the school
+                    </p>
                   ) : (
                     <p className="text-xs text-success mt-1.5">✓ No outstanding balance</p>
                   )}

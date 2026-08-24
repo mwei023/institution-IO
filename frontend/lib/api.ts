@@ -33,8 +33,9 @@ api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    const isAuthEndpoint = originalRequest.url?.includes("/auth/login") || originalRequest.url?.includes("/auth/refresh");
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (error.response?.status === 401 && !originalRequest._retry && !isAuthEndpoint) {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
@@ -129,14 +130,17 @@ export const announcementsAPI = {
 export const academicsAPI = {
   listClasses: (params?: { level?: number; academic_year_id?: string }) =>
     api.get("/academics/classes", { params }),
-  getAttendanceSheet: (classId: string, date?: string) =>
-    api.get("/academics/attendance/sheet", { params: { class_id: classId, date } }),
+  getAttendanceSheet: (classId: string, date?: string, sessionType?: string, periodId?: string) =>
+    api.get("/academics/attendance/sheet", {
+      params: { class_id: classId, date, session_type: sessionType, period_id: periodId },
+    }),
   submitAttendance: (data: {
-    class_id: string;
-    session_date: string;
-    session_type: "daily" | "period";
-    records: Array<{ student_id: string; status: string; remarks?: string }>;
-  }) => api.post("/academics/attendance", data),
+  class_id: string;
+  session_date: string;
+  session_type: "daily" | "period";
+  period_id?: string;
+  records: Array<{ student_id: string; status: string; remarks?: string }>;
+}) => api.post("/academics/attendance", data),
   getAttendanceSummary: (classId: string, startDate?: string, endDate?: string) =>
     api.get("/academics/attendance/summary", {
       params: { class_id: classId, start_date: startDate, end_date: endDate },
@@ -174,8 +178,22 @@ export const academicsAPI = {
     api.post("/academics/report-cards/publish", data),
   unpublishReportCard: (data: { student_id: string; term_id: string }) =>
     api.post("/academics/report-cards/unpublish", data),
+  createClass: (data: {
+    academic_year_id: string;
+    name: string;
+    stream?: string;
+    level: number;
+    capacity: number;
+    class_teacher_id?: string;
+  }) => api.post("/academics/classes", data),
+  assignClassTeacher: (classId: string, classTeacherId: string) =>
+    api.post(`/academics/classes/${classId}/assign-teacher`, { class_teacher_id: classTeacherId }),
+  listTeachers: () => api.get("/academics/teachers"),
+  listAcademicYears: () => api.get("/academics/academic-years"),
 
   listTerms: () => api.get("/academics/terms"),
+  getMyTimetable: (termId?: string) =>
+    api.get("/academics/my-timetable", { params: termId ? { term_id: termId } : {} }),
 };
 
 export const cbcAPI = {

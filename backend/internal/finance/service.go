@@ -2,10 +2,12 @@ package finance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"institution-os/internal/finance/mpesa"
 	"institution-os/pkg/events"
 	"github.com/rs/zerolog/log"
@@ -16,11 +18,12 @@ type Service struct {
 	repo        *Repository
 	mpesaClient *mpesa.Client
 	publisher   events.Publisher
+	callbackURL string
 }
 
 // NewService creates a new finance service.
-func NewService(repo *Repository, mpesaClient *mpesa.Client, publisher events.Publisher) *Service {
-	return &Service{repo: repo, mpesaClient: mpesaClient, publisher: publisher}
+func NewService(repo *Repository, mpesaClient *mpesa.Client, publisher events.Publisher, callbackURL string) *Service {
+	return &Service{repo: repo, mpesaClient: mpesaClient, publisher: publisher, callbackURL: callbackURL}
 }
 
 // GetStudentFeeAccount retrieves the fee summary for a student.
@@ -40,29 +43,70 @@ func (s *Service) GetStudentFeeAccount(ctx context.Context, institutionID, stude
 }
 
 // InitiateSTKPush starts an M-Pesa STK push payment for a student.
-func (s *Service) InitiateSTKPush(ctx context.Context, institutionID uuid.UUID, req *STKPushRequest) (*STKPushResponse, error) {
+func (s *Service) InitiateSTKPush(ctx context.Context, institutionID uuid.UUID, initiatedBy uuid.UUID, req *STKPushRequest) (*STKPushResponse, error) {
 	// Verify student exists
-	studentID := req.StudentID
-	acct, err := s.repo.GetStudentFeeAccount(ctx, institutionID, studentID)
+	acct, err := s.repo.GetStudentFeeAccount(ctx, institutionID, req.StudentID)
 	if err != nil {
 		return nil, fmt.Errorf("student not found: %w", err)
 	}
-
-	// Format phone for Daraja (254XXXXXXXXX)
-	phone := formatPhone(req.Phone)
-
-	// Use student's admission number as account reference (accountant can identify payment)
-	// For now use student ID as reference
-	accountRef := acct.StudentName
 
 	amountInt := int64(req.Amount)
 	if amountInt <= 0 {
 		return nil, fmt.Errorf("amount must be greater than 0")
 	}
 
-	stkResp, err := s.mpesaClient.InitiateSTKPush(ctx, phone, accountRef, amountInt)
+	// Resolve which till/paybill this institution pushes through.
+	// This — not anything in the callback payload — is the source of truth
+	// for institution attribution going forward.
+	channel, err := s.repo.GetDefaultChannel(ctx, institutionID)
+	if err != nil {
+		if errors.Is(err, ErrChannelNotFound) {
+			return nil, fmt.Errorf("institution has no active M-Pesa channel configured")
+		}
+		return nil, fmt.Errorf("resolve payment channel: %w", err)
+	}
+
+	creds := mpesa.ChannelCredentials{
+		Shortcode: derefOr(channel.Shortcode, ""),
+		Passkey:   derefOr(channel.Passkey, ""),
+	}
+	if channel.ConsumerKey != nil {
+		creds.ConsumerKey = *channel.ConsumerKey
+	}
+	if channel.ConsumerSecret != nil {
+		creds.ConsumerSecret = *channel.ConsumerSecret
+	}
+
+	phone := formatPhone(req.Phone)
+	accountRef := acct.StudentName
+
+	stkResp, err := s.mpesaClient.InitiateSTKPush(ctx, creds, s.callbackURL, phone, accountRef, amountInt)
 	if err != nil {
 		return nil, fmt.Errorf("initiate STK push: %w", err)
+	}
+
+	// Record the request BEFORE returning to the caller — this is what lets
+	// the callback resolve institution_id/channel_id later without trusting
+	// anything Daraja sends us.
+	stkReq := &StkRequest{
+		ID:                 uuid.New(),
+		InstitutionID:      institutionID,
+		ChannelID:          channel.ID,
+		StudentID:          req.StudentID,
+		InitiatedBy:        initiatedBy,
+		CheckoutRequestID:  stkResp.CheckoutRequestID,
+		MerchantRequestID:  stkResp.MerchantRequestID,
+		PhoneNumber:        phone,
+		Amount:             req.Amount,
+	}
+	if err := s.repo.CreateStkRequest(ctx, stkReq); err != nil {
+		// The push already went out to the customer's phone — we can't undo that.
+		// But if we fail to record it, the callback will have nothing to resolve
+		// against and the payment will silently fail to attribute. This must be loud.
+		log.Error().Err(err).
+			Str("checkout_request_id", stkResp.CheckoutRequestID).
+			Msg("CRITICAL: failed to record stk request — incoming callback will be unattributable")
+		return nil, fmt.Errorf("record stk request: %w", err)
 	}
 
 	return &STKPushResponse{
@@ -73,18 +117,39 @@ func (s *Service) InitiateSTKPush(ctx context.Context, institutionID uuid.UUID, 
 }
 
 // ProcessDarajaCallback handles an M-Pesa payment callback.
-func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.UUID, payload []byte, callback *DarajaCallbackBody) error {
+// institutionID is NOT a trusted input — it's resolved inside this function
+// from mpesa_stk_requests, keyed by CheckoutRequestID. This is the fix for
+// the pre-launch blocker: attribution now comes from a record we created
+// ourselves at push time, never from parsing anything Daraja sends back.
+func (s *Service) ProcessDarajaCallback(ctx context.Context, payload []byte, callback *DarajaCallbackBody) error {
 	stk := callback.Body.StkCallback
 
-	// Build transaction record
-	tx := &MpesaTransaction{
+	if stk.CheckoutRequestID == "" {
+		return fmt.Errorf("callback missing CheckoutRequestID — cannot attribute")
+	}
+
+	stkReq, err := s.repo.GetStkRequestByCheckoutID(ctx, stk.CheckoutRequestID)
+	if err != nil {
+		if errors.Is(err, ErrStkRequestNotFound) {
+			// A callback for a push we never initiated (or a stale/spoofed one).
+			// Log loudly but return nil so Daraja doesn't retry.
+			log.Warn().
+				Str("checkout_request_id", stk.CheckoutRequestID).
+				Msg("mpesa callback for unknown checkout_request_id — possible spoof or stale request")
+			return nil
+		}
+		return fmt.Errorf("resolve stk request: %w", err)
+	}
+	institutionID := stkReq.InstitutionID
+
+		tx := &MpesaTransaction{
 		ID:                uuid.New(),
 		CheckoutRequestID: stk.CheckoutRequestID,
 		ResultCode:        stk.ResultCode,
 		ResultDescription: stk.ResultDesc,
+		StkRequestID:      &stkReq.ID,
+		ChannelID:         &stkReq.ChannelID,
 	}
-
-	// Extract metadata fields (Amount, PhoneNumber, MpesaReceiptNumber, etc.)
 	for _, item := range stk.CallbackMetadata.Item {
 		switch item.Name {
 		case "Amount":
@@ -106,14 +171,12 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 		}
 	}
 
-	// Store raw Daraja event regardless of result
 	if err := s.repo.StoreMpesaTransaction(ctx, institutionID, tx, payload); err != nil {
 		log.Error().Err(err).Msg("store mpesa transaction")
-		// Don't fail — just log
 	}
 
-	// Only process successful payments
 	if stk.ResultCode != 0 {
+		_ = s.repo.MarkStkRequestStatus(ctx, stkReq.ID, "failed")
 		log.Info().
 			Int("result_code", stk.ResultCode).
 			Str("result_desc", stk.ResultDesc).
@@ -125,7 +188,6 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 		return fmt.Errorf("missing MpesaReceiptNumber in successful callback")
 	}
 
-	// Idempotency check
 	processed, err := s.repo.IsMpesaReceiptProcessed(ctx, institutionID, *tx.MpesaReceiptNumber)
 	if err != nil {
 		return err
@@ -135,14 +197,13 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 		return nil
 	}
 
-	// Look up student by account reference (admission number)
-	studentID, err := s.repo.GetStudentByAdmissionNumber(ctx, institutionID, tx.AccountReference)
-	if err != nil {
-		log.Error().Err(err).Str("account_ref", tx.AccountReference).Msg("student not found for mpesa payment")
-		return nil // Don't fail callback — log and investigate manually
-	}
+	// Student comes from OUR record of who this push was for — not from
+	// parsing AccountReference. (Note: the old code looked up AccountReference
+	// via GetStudentByAdmissionNumber, but AccountReference was actually the
+	// student's full name, not an admission number — that lookup would never
+	// have matched. This replaces it correctly.)
+	studentID := stkReq.StudentID
 
-	// Record payment
 	receiptNumber, err := s.repo.GetNextReceiptNumber(ctx, institutionID)
 	if err != nil {
 		return err
@@ -151,7 +212,7 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 	payment := &FeePayment{
 		ID:             uuid.New(),
 		InstitutionID:  institutionID,
-		StudentID:      *studentID,
+		StudentID:      studentID,
 		ReceiptNumber:  receiptNumber,
 		Amount:         tx.Amount,
 		PaymentMethod:  "mpesa",
@@ -163,12 +224,9 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 		return fmt.Errorf("create payment: %w", err)
 	}
 
-	// Allocate this payment across the student's outstanding invoices
-	// (oldest-first, per current default policy) and recalculate each.
-	touchedInvoices, err := s.repo.AllocatePayment(ctx, institutionID, *studentID, payment.ID, tx.Amount)
+	touchedInvoices, err := s.repo.AllocatePayment(ctx, institutionID, studentID, payment.ID, tx.Amount)
 	if err != nil {
 		log.Error().Err(err).Msg("allocate mpesa payment")
-		// Don't fail the callback — payment is recorded, reconciliation can happen manually
 	}
 	for _, invID := range touchedInvoices {
 		if err := s.repo.UpdateInvoicePaidAmount(ctx, institutionID, invID); err != nil {
@@ -176,12 +234,11 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, institutionID uuid.
 		}
 	}
 
-	// Mark transaction as processed
 	if err := s.repo.MarkMpesaTransactionProcessed(ctx, institutionID, *tx.MpesaReceiptNumber, payment.ID); err != nil {
 		log.Error().Err(err).Msg("mark mpesa processed")
 	}
+	_ = s.repo.MarkStkRequestStatus(ctx, stkReq.ID, "completed")
 
-	// Publish payment event
 	evt := events.New(events.EventPaymentReceived, institutionID.String())
 	evt.EntityType = "fee_payment"
 	evt.EntityID = payment.ID.String()
@@ -232,7 +289,7 @@ func (s *Service) RecordManualPayment(ctx context.Context, institutionID, receiv
 	if req.InvoiceID != nil {
 		if err := s.repo.CreatePaymentAllocation(ctx, institutionID, payment.ID, *req.InvoiceID, payment.Amount); err != nil {
 			log.Error().Err(err).Msg("create payment allocation for manual payment")
-    }
+		}
 
 		if err := s.repo.UpdateInvoicePaidAmount(ctx, institutionID, *req.InvoiceID); err != nil {
 			log.Error().Err(err).Msg("update invoice paid amount")
@@ -262,18 +319,162 @@ func formatPhone(phone string) string {
 	if len(phone) == 0 {
 		return phone
 	}
-	// Strip leading +
 	if phone[0] == '+' {
 		phone = phone[1:]
 	}
-	// Convert 07XXXXXXXX → 2547XXXXXXXX
 	if len(phone) == 10 && phone[0] == '0' {
 		phone = "254" + phone[1:]
 	}
 	return phone
 }
 
+// derefOr returns *s if non-nil, otherwise fallback.
+func derefOr(s *string, fallback string) string {
+	if s == nil {
+		return fallback
+	}
+	return *s
+}
+
 // GetOutstandingBalances returns every student with an unpaid balance.
 func (s *Service) GetOutstandingBalances(ctx context.Context, institutionID uuid.UUID) ([]*StudentBalance, error) {
 	return s.repo.ListStudentsWithOutstandingBalance(ctx, institutionID)
+}
+
+// --- Payment Channels ---
+
+// PaymentChannel represents a till/paybill/bank account an institution receives money through.
+type PaymentChannel struct {
+	ID                uuid.UUID
+	InstitutionID     uuid.UUID
+	ChannelType       string // mpesa_paybill | mpesa_till | bank_account
+	Name              string
+	Shortcode         *string
+	Passkey           *string
+	ConsumerKey       *string
+	ConsumerSecret    *string
+	BankName          *string
+	BankAccountNumber *string
+	BankAccountName   *string
+	IsDefault         bool
+	IsActive          bool
+}
+
+var ErrChannelNotFound = errors.New("payment channel not found")
+
+// GetDefaultChannel returns the institution's default active M-Pesa channel.
+// This is what InitiateSTKPush uses when the caller doesn't specify a channel explicitly.
+func (r *Repository) GetDefaultChannel(ctx context.Context, institutionID uuid.UUID) (*PaymentChannel, error) {
+	var c PaymentChannel
+	err := r.db.QueryRow(ctx, `
+		SELECT id, institution_id, channel_type, name, shortcode, passkey,
+		       consumer_key, consumer_secret, is_default, is_active
+		FROM payment_channels
+		WHERE institution_id = $1
+		  AND is_default = true
+		  AND is_active = true
+		  AND deleted_at IS NULL
+		  AND channel_type IN ('mpesa_paybill','mpesa_till')`,
+		institutionID,
+	).Scan(
+		&c.ID, &c.InstitutionID, &c.ChannelType, &c.Name, &c.Shortcode, &c.Passkey,
+		&c.ConsumerKey, &c.ConsumerSecret, &c.IsDefault, &c.IsActive,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrChannelNotFound
+		}
+		return nil, fmt.Errorf("get default channel: %w", err)
+	}
+	return &c, nil
+}
+
+// GetChannelByShortcode resolves a channel by its Daraja BusinessShortCode.
+// Not currently called by the STK flow (checkout_request_id is authoritative there) —
+// kept for the future manual/bank-reconciliation path.
+func (r *Repository) GetChannelByShortcode(ctx context.Context, shortcode string) (*PaymentChannel, error) {
+	var c PaymentChannel
+	err := r.db.QueryRow(ctx, `
+		SELECT id, institution_id, channel_type, name, shortcode, passkey,
+		       consumer_key, consumer_secret, is_default, is_active
+		FROM payment_channels
+		WHERE shortcode = $1 AND deleted_at IS NULL`,
+		shortcode,
+	).Scan(
+		&c.ID, &c.InstitutionID, &c.ChannelType, &c.Name, &c.Shortcode, &c.Passkey,
+		&c.ConsumerKey, &c.ConsumerSecret, &c.IsDefault, &c.IsActive,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrChannelNotFound
+		}
+		return nil, fmt.Errorf("get channel by shortcode: %w", err)
+	}
+	return &c, nil
+}
+
+// --- STK Requests ---
+
+// StkRequest tracks an outbound STK push, keyed by Daraja's checkout_request_id.
+// This is the record that lets the callback resolve institution_id without
+// trusting anything in the callback payload itself.
+type StkRequest struct {
+	ID                uuid.UUID
+	InstitutionID     uuid.UUID
+	ChannelID         uuid.UUID
+	StudentID         uuid.UUID
+	InitiatedBy       uuid.UUID
+	CheckoutRequestID string
+	MerchantRequestID string
+	PhoneNumber       string
+	Amount            float64
+	Status            string
+}
+
+var ErrStkRequestNotFound = errors.New("stk request not found")
+
+// CreateStkRequest records an outbound STK push before it's sent to Daraja,
+// so the callback has something authoritative to resolve against.
+func (r *Repository) CreateStkRequest(ctx context.Context, req *StkRequest) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO mpesa_stk_requests (
+			id, institution_id, channel_id, student_id, initiated_by,
+			checkout_request_id, merchant_request_id, phone_number, amount, status, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',NOW())`,
+		req.ID, req.InstitutionID, req.ChannelID, req.StudentID, req.InitiatedBy,
+		req.CheckoutRequestID, req.MerchantRequestID, req.PhoneNumber, req.Amount,
+	)
+	return err
+}
+
+// GetStkRequestByCheckoutID is the core lookup the callback handler uses to
+// resolve which institution and channel a Daraja callback actually belongs to.
+func (r *Repository) GetStkRequestByCheckoutID(ctx context.Context, checkoutRequestID string) (*StkRequest, error) {
+	var req StkRequest
+	err := r.db.QueryRow(ctx, `
+		SELECT id, institution_id, channel_id, student_id, initiated_by,
+		       checkout_request_id, merchant_request_id, phone_number, amount, status
+		FROM mpesa_stk_requests
+		WHERE checkout_request_id = $1`,
+		checkoutRequestID,
+	).Scan(
+		&req.ID, &req.InstitutionID, &req.ChannelID, &req.StudentID, &req.InitiatedBy,
+		&req.CheckoutRequestID, &req.MerchantRequestID, &req.PhoneNumber, &req.Amount, &req.Status,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrStkRequestNotFound
+		}
+		return nil, fmt.Errorf("get stk request: %w", err)
+	}
+	return &req, nil
+}
+
+// MarkStkRequestStatus updates an mpesa_stk_requests row once the callback resolves it.
+func (r *Repository) MarkStkRequestStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE mpesa_stk_requests SET status = $1 WHERE id = $2`,
+		status, id,
+	)
+	return err
 }

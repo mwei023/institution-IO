@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { useInstitutionStore } from "./institutionStore";
 
 export interface UserProfile {
   id: string;
@@ -17,11 +18,13 @@ interface AuthState {
   accessToken: string | null;
   institutionSlug: string | null;
   isAuthenticated: boolean;
+  hasHydrated: boolean;
 
   setAuth: (user: UserProfile, token: string, slug: string) => void;
   clearAuth: () => void;
   hasPermission: (perm: string) => boolean;
   hasRole: (...roles: string[]) => boolean;
+  setHasHydrated: (v: boolean) => void;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -31,9 +34,9 @@ export const useAuthStore = create<AuthState>()(
       accessToken: null,
       institutionSlug: null,
       isAuthenticated: false,
+      hasHydrated: false,
 
       setAuth: (user, accessToken, institutionSlug) => {
-        // Also store in localStorage for the axios interceptor
         if (typeof window !== "undefined") {
           localStorage.setItem("access_token", accessToken);
           localStorage.setItem("institution_slug", institutionSlug);
@@ -47,6 +50,7 @@ export const useAuthStore = create<AuthState>()(
           localStorage.removeItem("institution_slug");
         }
         set({ user: null, accessToken: null, institutionSlug: null, isAuthenticated: false });
+        useInstitutionStore.getState().clearContext();
       },
 
       hasPermission: (perm: string) => {
@@ -60,6 +64,8 @@ export const useAuthStore = create<AuthState>()(
         if (!user) return false;
         return roles.includes(user.role);
       },
+
+      setHasHydrated: (v: boolean) => set({ hasHydrated: v }),
     }),
     {
       name: "institution-os-auth",
@@ -69,6 +75,12 @@ export const useAuthStore = create<AuthState>()(
         institutionSlug: state.institutionSlug,
         isAuthenticated: state.isAuthenticated,
       }),
+      // Fires once the persisted state has actually loaded from localStorage.
+      // Without this, any guard reading `user` on first render sees null even
+      // for a logged-in person and would wrongly redirect to /login.
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
     }
   )
 );

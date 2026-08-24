@@ -153,9 +153,16 @@ func (h *Handler) GetAttendanceSheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dateStr := r.URL.Query().Get("date")
+		dateStr := r.URL.Query().Get("date")
+	sessionType := r.URL.Query().Get("session_type")
+	var periodID *uuid.UUID
+	if pidStr := r.URL.Query().Get("period_id"); pidStr != "" {
+		if pid, err := uuid.Parse(pidStr); err == nil {
+			periodID = &pid
+		}
+	}
 
-	session, err := h.svc.GetAttendanceSheet(r.Context(), institutionID, classID, teacherID, dateStr)
+	session, err := h.svc.GetAttendanceSheet(r.Context(), institutionID, classID, teacherID, dateStr, sessionType, periodID)
 	if err != nil {
 		log.Error().Err(err).Msg("get attendance sheet")
 		response.Error(w, http.StatusBadRequest, "ATTENDANCE_ERROR", err.Error())
@@ -194,6 +201,10 @@ func (h *Handler) SubmitAttendance(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrNotAssignedToClass):
 			response.Error(w, http.StatusForbidden, "NOT_ASSIGNED_TO_CLASS",
 				"You are not timetabled to teach this class")
+		case errors.Is(err, ErrClassNeedsTeacherAssignment):
+			response.Error(w, http.StatusConflict, 
+				"CLASS_NEEDS_TEACHER_ASSIGNMENT",
+				"This class has no assigned class teacher yet. Ask an administrator to assign one before taking daily attendance.")
 		case errors.Is(err, ErrClassNotFound):
 			response.NotFound(w, "CLASS")
 		default:
@@ -272,21 +283,27 @@ func (h *Handler) GetGradeComponents(w http.ResponseWriter, r *http.Request) {
 // GetGradebook handles GET /api/v1/academics/grades/entries?component_id=...
 func (h *Handler) GetGradebook(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
+	teacherID, _ := uuid.Parse(claims.UserID)
+
 	componentID, err := uuid.Parse(r.URL.Query().Get("component_id"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_COMPONENT_ID", "Valid component_id is required")
 		return
 	}
 
-	entries, err := h.svc.GetGradebook(r.Context(), institutionID, componentID)
+	entries, err := h.svc.GetGradebook(r.Context(), institutionID, teacherID, claims.Role == "teacher", componentID)
 	if err != nil {
+		if errors.Is(err, ErrNotTimetabledForSubject) {
+			response.Error(w, http.StatusForbidden, "NOT_ASSIGNED", "You are not timetabled to teach this subject in this class")
+			return
+		}
 		response.InternalError(w)
 		return
 	}
 	response.Ok(w, entries)
 }
 
-// SaveGrades handles POST /api/v1/academics/grades/entries
 func (h *Handler) SaveGrades(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
 	claims := auth.ClaimsFromContext(r.Context())
@@ -298,7 +315,11 @@ func (h *Handler) SaveGrades(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.SaveGrades(r.Context(), institutionID, teacherID, &req); err != nil {
+	if err := h.svc.SaveGrades(r.Context(), institutionID, teacherID, claims.Role == "teacher", &req); err != nil {
+		if errors.Is(err, ErrNotTimetabledForSubject) {
+			response.Error(w, http.StatusForbidden, "NOT_ASSIGNED", "You are not timetabled to teach this subject in this class")
+			return
+		}
 		log.Error().Err(err).Msg("save grades")
 		response.Error(w, http.StatusBadRequest, "GRADES_ERROR", err.Error())
 		return
@@ -471,4 +492,66 @@ func (h *Handler) ListTerms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Ok(w, terms)
+}
+
+func (h *Handler) CreateClass(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var req CreateClassRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	class, err := h.svc.CreateClass(r.Context(), institutionID, &req)
+	if err != nil {
+		log.Error().Err(err).Msg("create class")
+		response.Error(w, http.StatusBadRequest, "CLASS_ERROR", err.Error())
+		return
+	}
+	response.Created(w, class)
+}
+
+func (h *Handler) AssignClassTeacher(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	classID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid class ID")
+		return
+	}
+	var req AssignClassTeacherRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	if err := h.svc.AssignClassTeacher(r.Context(), institutionID, classID, req.ClassTeacherID); err != nil {
+		if errors.Is(err, ErrClassNotFound) {
+			response.NotFound(w, "CLASS")
+			return
+		}
+		log.Error().Err(err).Msg("assign class teacher")
+		response.InternalError(w)
+		return
+	}
+	response.NoContent(w)
+}
+
+func (h *Handler) ListTeachers(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	teachers, err := h.svc.ListTeachers(r.Context(), institutionID)
+	if err != nil {
+		log.Error().Err(err).Msg("list teachers")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, teachers)
+}
+
+func (h *Handler) ListAcademicYears(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	years, err := h.svc.ListAcademicYears(r.Context(), institutionID)
+	if err != nil {
+		log.Error().Err(err).Msg("list academic years")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, years)
 }

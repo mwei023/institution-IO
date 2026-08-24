@@ -1,0 +1,16 @@
+                          conname                           |     table_name     |                                                                                                  definition                                                                                                   
+------------------------------------------------------------+--------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ fee_payments_payment_method_check                          | fee_payments       | CHECK (((payment_method)::text = ANY ((ARRAY['mpesa'::character varying, 'cash'::character varying, 'bank_transfer'::character varying, 'cheque'::character varying, 'waiver'::character varying])::text[])))
+ fee_payments_pkey                                          | fee_payments       | PRIMARY KEY (id)
+ fee_payments_institution_id_receipt_number_key             | fee_payments       | UNIQUE (institution_id, receipt_number)
+ fee_payments_institution_id_fkey                           | fee_payments       | FOREIGN KEY (institution_id) REFERENCES institutions(id)
+ fee_payments_student_id_fkey                               | fee_payments       | FOREIGN KEY (student_id) REFERENCES students(id)
+ fee_payments_invoice_id_fkey                               | fee_payments       | FOREIGN KEY (invoice_id) REFERENCES fee_invoices(id)
+ fee_payments_received_by_fkey                              | fee_payments       | FOREIGN KEY (received_by) REFERENCES users(id)
+ fee_payments_reversed_by_fkey                              | fee_payments       | FOREIGN KEY (reversed_by) REFERENCES users(id)
+ mpesa_transactions_pkey                                    | mpesa_transactions | PRIMARY KEY (id)
+ mpesa_transactions_institution_id_mpesa_receipt_number_key | mpesa_transactions | UNIQUE (institution_id, mpesa_receipt_number)
+ mpesa_transactions_institution_id_fkey                     | mpesa_transactions | FOREIGN KEY (institution_id) REFERENCES institutions(id)
+ mpesa_transactions_payment_id_fkey                         | mpesa_transactions | FOREIGN KEY (payment_id) REFERENCES fee_payments(id)
+(12 rows)
+

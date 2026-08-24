@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"errors"
 
 	"institution-os/pkg/events"
 
@@ -77,7 +78,7 @@ func (s *Service) GetTeacherTimetable(ctx context.Context, institutionID, teache
 // ─── Attendance ───────────────────────────────────────────────────
 
 // GetAttendanceSheet returns an open session + blank records for taking attendance.
-func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID, teacherID uuid.UUID, dateStr string) (*AttendanceSession, error) {
+func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID, teacherID uuid.UUID, dateStr, sessionType string, periodID *uuid.UUID) (*AttendanceSession, error) {
 	var sessionDate time.Time
 	var err error
 	if dateStr == "" {
@@ -88,8 +89,11 @@ func (s *Service) GetAttendanceSheet(ctx context.Context, institutionID, classID
 			return nil, fmt.Errorf("invalid date format, use YYYY-MM-DD")
 		}
 	}
+	if sessionType == "" {
+		sessionType = "daily"
+	}
 
-	session, err := s.repo.GetOrCreateSession(ctx, institutionID, classID, teacherID, sessionDate, "daily")
+	session, err := s.repo.GetOrCreateSession(ctx, institutionID, classID, teacherID, sessionDate, sessionType, periodID)
 	if err != nil {
 		return nil, err
 	}
@@ -134,20 +138,34 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
 	}
  
 	if req.SessionType == "daily" {
-		if class.ClassTeacherID != nil && *class.ClassTeacherID != teacherID && !canOverrideClassTeacher {
-			return nil, ErrNotClassTeacher
-		}
-		// If the class has no assigned class teacher yet, any teacher with
-		// attendance:write may submit — there's no one else who could.
-	} else {
-		assigned, err := s.repo.TeacherHasAssignmentInClass(ctx, institutionID, teacherID, req.ClassID)
-		if err != nil {
-			return nil, fmt.Errorf("check teacher assignment: %w", err)
-		}
-		if !assigned && !canOverrideClassTeacher {
-			return nil, ErrNotAssignedToClass
-		}
-	}
+    switch {
+    case class.ClassTeacherID == nil:
+        // No class teacher assigned yet — this is a setup gap, not a
+        // green light for any teacher. Only an explicit override
+        // (attendance:approve) may submit until an admin assigns one.
+        if !canOverrideClassTeacher {
+            return nil, ErrClassNeedsTeacherAssignment
+        }
+    case *class.ClassTeacherID != teacherID:
+        if !canOverrideClassTeacher {
+            return nil, ErrNotClassTeacher
+        }
+    }
+} else {
+    if req.PeriodID == nil {
+        return nil, fmt.Errorf("period_id is required for period attendance")
+    }
+    period, err := s.repo.GetTimetablePeriodByID(ctx, institutionID, *req.PeriodID)
+    if err != nil {
+        return nil, err
+    }
+    if period.ClassID != req.ClassID {
+        return nil, fmt.Errorf("this period does not belong to the specified class")
+    }
+    if period.TeacherID != teacherID && !canOverrideClassTeacher {
+        return nil, ErrNotAssignedToClass
+    }
+}
  
 	// Validate every student in the request actually belongs to this class,
 	// before writing anything. Without this check, a wrong class_id in the
@@ -167,7 +185,7 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
 		}
 	}
  
-	session, err := s.repo.GetOrCreateSession(ctx, institutionID, req.ClassID, teacherID, sessionDate, req.SessionType)
+	session, err := s.repo.GetOrCreateSession(ctx, institutionID, req.ClassID, teacherID, sessionDate, req.SessionType, req.PeriodID)
 	if err != nil {
 		return nil, err
 	}
@@ -221,16 +239,45 @@ func (s *Service) GetGradeComponents(ctx context.Context, institutionID, classID
 }
 
 // GetGradebook returns grade entries for a component.
-func (s *Service) GetGradebook(ctx context.Context, institutionID, componentID uuid.UUID) ([]*GradeEntry, error) {
-	return s.repo.GetGradebook(ctx, institutionID, componentID)
-}
+var ErrNotTimetabledForSubject = errors.New("teacher is not timetabled to teach this subject in this class")
 
-// SaveGrades bulk-saves grade entries for a component.
-func (s *Service) SaveGrades(ctx context.Context, institutionID, teacherID uuid.UUID, req *BulkGradeEntryRequest) error {
+func (s *Service) SaveGrades(ctx context.Context, institutionID, teacherID uuid.UUID, isTeacherRole bool, req *BulkGradeEntryRequest) error {
 	if len(req.Entries) == 0 {
 		return fmt.Errorf("no entries provided")
 	}
+
+	if isTeacherRole {
+		component, err := s.repo.GetGradeComponentByID(ctx, institutionID, req.ComponentID)
+		if err != nil {
+			return err
+		}
+		ok, err := s.repo.TeacherIsTimetabledForSubjectInClass(ctx, institutionID, teacherID, component.ClassID, component.SubjectID, component.TermID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrNotTimetabledForSubject
+		}
+	}
+
 	return s.repo.SaveGradeEntries(ctx, institutionID, req.ComponentID, teacherID, req.Entries)
+}
+
+func (s *Service) GetGradebook(ctx context.Context, institutionID, teacherID uuid.UUID, isTeacherRole bool, componentID uuid.UUID) ([]*GradeEntry, error) {
+	if isTeacherRole {
+		component, err := s.repo.GetGradeComponentByID(ctx, institutionID, componentID)
+		if err != nil {
+			return nil, err
+		}
+		ok, err := s.repo.TeacherIsTimetabledForSubjectInClass(ctx, institutionID, teacherID, component.ClassID, component.SubjectID, component.TermID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, ErrNotTimetabledForSubject
+		}
+	}
+	return s.repo.GetGradebook(ctx, institutionID, componentID)
 }
 
 // CreateGradeComponent defines a new assessment component for a class/subject/term.
@@ -335,4 +382,23 @@ func (s *Service) GetChildSubjectScores(ctx context.Context, institutionID, stud
 // ListTerms returns all terms for an institution.
 func (s *Service) ListTerms(ctx context.Context, institutionID uuid.UUID) ([]*Term, error) {
 	return s.repo.ListTerms(ctx, institutionID)
+}
+
+func (s *Service) CreateClass(ctx context.Context, institutionID uuid.UUID, req *CreateClassRequest) (*Class, error) {
+	if req.Capacity <= 0 {
+		return nil, fmt.Errorf("capacity must be greater than 0")
+	}
+	return s.repo.CreateClass(ctx, institutionID, req)
+}
+
+func (s *Service) AssignClassTeacher(ctx context.Context, institutionID, classID, teacherID uuid.UUID) error {
+	return s.repo.AssignClassTeacher(ctx, institutionID, classID, teacherID)
+}
+
+func (s *Service) ListTeachers(ctx context.Context, institutionID uuid.UUID) ([]*TeacherOption, error) {
+	return s.repo.ListTeachers(ctx, institutionID)
+}
+
+func (s *Service) ListAcademicYears(ctx context.Context, institutionID uuid.UUID) ([]*AcademicYear, error) {
+	return s.repo.ListAcademicYears(ctx, institutionID)
 }

@@ -55,6 +55,7 @@ type AttendanceSession struct {
 	ClassID       uuid.UUID  `json:"class_id"`
 	ClassName     string     `json:"class_name"`
 	TeacherID     uuid.UUID  `json:"teacher_id"`
+	PeriodID      *uuid.UUID `json:"period_id,omitempty"`
 	SessionDate   time.Time  `json:"session_date"`
 	SessionType   string     `json:"session_type"`
 	Status        string     `json:"status"`
@@ -76,6 +77,7 @@ type TakeAttendanceRequest struct {
 	ClassID     uuid.UUID           `json:"class_id" validate:"required"`
 	SessionDate string              `json:"session_date" validate:"required"`
 	SessionType string              `json:"session_type" validate:"required,oneof=daily period"`
+	PeriodID    *uuid.UUID        `json:"period_id,omitempty"`
 	Records     []AttendanceEntry   `json:"records" validate:"required,min=1"`
 }
 
@@ -216,4 +218,31 @@ type BulkReportCardFailure struct {
 type PublishReportCardRequest struct {
 	StudentID uuid.UUID `json:"student_id" validate:"required"`
 	TermID    uuid.UUID `json:"term_id" validate:"required"`
+}
+
+type CreateClassRequest struct {
+	AcademicYearID uuid.UUID  `json:"academic_year_id" validate:"required"`
+	Name           string     `json:"name" validate:"required"`
+	Stream         *string    `json:"stream,omitempty"`
+	Level          int        `json:"level" validate:"required"`
+	Capacity       int        `json:"capacity" validate:"required,gt=0"`
+	ClassTeacherID *uuid.UUID `json:"class_teacher_id,omitempty"` // optional at creation
+}
+
+type AssignClassTeacherRequest struct {
+	ClassTeacherID uuid.UUID `json:"class_teacher_id" validate:"required"`
+}
+
+type TeacherOption struct {
+	ID       uuid.UUID `json:"id"`
+	FullName string    `json:"full_name"`
+}
+
+type AcademicYear struct {
+	ID            uuid.UUID `json:"id"`
+	InstitutionID uuid.UUID `json:"institution_id"`
+	Name          string    `json:"name"`
+	StartDate     time.Time `json:"start_date"`
+	EndDate       time.Time `json:"end_date"`
+	IsCurrent     bool      `json:"is_current"`
 }

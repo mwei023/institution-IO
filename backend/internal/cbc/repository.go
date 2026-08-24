@@ -15,6 +15,7 @@ var (
 	ErrReportCardNotFound   = errors.New("cbc report card not found")
 	ErrReportCardPublished  = errors.New("report card already published — unpublish before regenerating")
 	ErrNoRatingBandsConfigured = errors.New("no rating bands configured for this curriculum/grade band")
+	ErrComponentNotFound = errors.New("learning area component not found")
 )
 
 // Repository handles database access for the CBC/CBE academic layer.
@@ -544,4 +545,50 @@ func (r *Repository) GetPublishedReportCardForStudent(ctx context.Context, insti
 		rc.Lines = append(rc.Lines, &l)
 	}
 	return &rc, lineRows.Err()
+}
+
+// GetStudentNames returns display names for a set of student IDs —
+// used by bulk report card generation, which otherwise never joins
+// against students at all.
+func (r *Repository) GetStudentNames(ctx context.Context, institutionID uuid.UUID, studentIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	if len(studentIDs) == 0 {
+		return map[uuid.UUID]string{}, nil
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT id, first_name || ' ' || last_name
+		FROM students
+		WHERE institution_id = $1 AND id = ANY($2)`,
+		institutionID, studentIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get student names: %w", err)
+	}
+	defer rows.Close()
+
+	names := map[uuid.UUID]string{}
+	for rows.Next() {
+		var id uuid.UUID
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		names[id] = name
+	}
+	return names, rows.Err()
+}
+
+func (r *Repository) GetComponentClassID(ctx context.Context, institutionID, componentID uuid.UUID) (uuid.UUID, error) {
+	var classID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		SELECT class_id FROM learning_area_components
+		WHERE institution_id = $1 AND id = $2`,
+		institutionID, componentID,
+	).Scan(&classID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, ErrComponentNotFound
+		}
+		return uuid.Nil, fmt.Errorf("get component class id: %w", err)
+	}
+	return classID, nil
 }
