@@ -184,6 +184,10 @@ func main() {
 				r.With(auth.RequirePermission("fees:read")).Get("/outstanding", financeHandler.GetOutstandingBalances)
 				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/stk-push", financeHandler.InitiateSTKPush)
 				r.With(auth.RequirePermission("fees:receipt")).Post("/pay/manual", financeHandler.RecordManualPayment)
+				r.With(auth.RequirePermission("fees:manage")).Post("/fee-structures", financeHandler.CreateFeeStructure)
+				r.With(auth.RequirePermission("fees:read")).Get("/fee-structures", financeHandler.ListFeeStructures)
+				r.With(auth.RequirePermission("fees:manage")).Post("/fee-structures/{id}/components", financeHandler.AddFeeComponent)
+				r.With(auth.RequirePermission("fees:manage")).Post("/invoices/generate-class", financeHandler.GenerateInvoicesForClass)
 			})
 
 			// Academics (8-4-4)

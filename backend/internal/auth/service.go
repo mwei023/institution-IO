@@ -33,14 +33,14 @@ var (
 
 // Service implements all authentication business logic.
 type Service struct {
-	repo       *Repository
+	repo       Store
 	cfg        *config.Config
 	privateKey interface{} // *rsa.PrivateKey
 	publicKey  interface{} // *rsa.PublicKey
 }
 
 // NewService creates a new auth service.
-func NewService(repo *Repository, cfg *config.Config) (*Service, error) {
+func NewService(repo Store, cfg *config.Config) (*Service, error) {
 	svc := &Service{repo: repo, cfg: cfg}
 	if err := svc.loadKeys(); err != nil {
 		return nil, err

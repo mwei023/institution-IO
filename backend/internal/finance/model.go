@@ -136,3 +136,48 @@ type MpesaTransaction struct {
 	StkRequestID         *uuid.UUID `json:"stk_request_id,omitempty"`
 	ChannelID            *uuid.UUID `json:"channel_id,omitempty"`
 }
+
+type CreateFeeStructureRequest struct {
+	AcademicYearID uuid.UUID  `json:"academic_year_id" validate:"required"`
+	ClassID        *uuid.UUID `json:"class_id,omitempty"`
+	Name           string     `json:"name" validate:"required"`
+}
+ 
+// AddFeeComponentRequest adds a single line item to an existing fee
+// structure — e.g. "Tuition", "Boarding", "Transport" — each with its
+// own amount and which term it applies to.
+type AddFeeComponentRequest struct {
+	Name        string     `json:"name" validate:"required"`
+	Amount      float64    `json:"amount" validate:"required,gt=0"`
+	TermNumber  *int       `json:"term_number,omitempty"`
+	IsMandatory bool       `json:"is_mandatory"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+}
+ 
+// GenerateInvoicesRequest generates one invoice per active student in a
+// class, from a fee structure's components, for a specific term.
+type GenerateInvoicesRequest struct {
+	FeeStructureID uuid.UUID `json:"fee_structure_id" validate:"required"`
+	ClassID        uuid.UUID `json:"class_id" validate:"required"`
+	TermID         uuid.UUID `json:"term_id" validate:"required"`
+	TermNumber     int       `json:"term_number" validate:"required"` // used to filter which components apply
+}
+ 
+// GenerateInvoicesResult mirrors the partial-success pattern already
+// established for report card generation (academics.BulkReportCardResult,
+// cbc.BulkReportCardResult) — every student is processed independently;
+// one student already having an invoice for this term is skipped and
+// recorded, not treated as a batch failure.
+type GenerateInvoicesResult struct {
+	ClassID         uuid.UUID     `json:"class_id"`
+	TermID          uuid.UUID     `json:"term_id"`
+	TotalStudents   int           `json:"total_students"`
+	InvoicesCreated int           `json:"invoices_created"`
+	Skipped         []InvoiceSkip `json:"skipped"`
+}
+ 
+type InvoiceSkip struct {
+	StudentID uuid.UUID `json:"student_id"`
+	Reason    string    `json:"reason"`
+}
+ 

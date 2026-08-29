@@ -181,3 +181,82 @@ func (h *Handler) GetOutstandingBalances(w http.ResponseWriter, r *http.Request)
 
 	response.Ok(w, balances)
 }
+
+func (h *Handler) CreateFeeStructure(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var req CreateFeeStructureRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	fs, err := h.svc.CreateFeeStructure(r.Context(), institutionID, &req)
+	if err != nil {
+		log.Error().Err(err).Msg("create fee structure")
+		response.Error(w, http.StatusBadRequest, "FEE_STRUCTURE_ERROR", err.Error())
+		return
+	}
+	response.Created(w, fs)
+}
+ 
+// ListFeeStructures handles GET /api/v1/finance/fee-structures?academic_year_id=
+func (h *Handler) ListFeeStructures(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var academicYearID *uuid.UUID
+	if s := r.URL.Query().Get("academic_year_id"); s != "" {
+		if id, err := uuid.Parse(s); err == nil {
+			academicYearID = &id
+		}
+	}
+	structures, err := h.svc.ListFeeStructures(r.Context(), institutionID, academicYearID)
+	if err != nil {
+		log.Error().Err(err).Msg("list fee structures")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, structures)
+}
+ 
+// AddFeeComponent handles POST /api/v1/finance/fee-structures/{id}/components
+func (h *Handler) AddFeeComponent(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	feeStructureID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid fee structure ID")
+		return
+	}
+	var req AddFeeComponentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	fc, err := h.svc.AddFeeComponent(r.Context(), institutionID, feeStructureID, &req)
+	
+	if err != nil {
+		if errors.Is(err, ErrFeeStructureNotFound) {
+			response.NotFound(w, "FEE_STRUCTURE")
+			return
+		}
+		log.Error().Err(err).Msg("add fee component")
+		response.Error(w, http.StatusBadRequest, "FEE_COMPONENT_ERROR", err.Error())
+		return
+	}
+	response.Created(w, fc)
+}
+ 
+// GenerateInvoicesForClass handles POST /api/v1/finance/invoices/generate-class
+func (h *Handler) GenerateInvoicesForClass(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var req GenerateInvoicesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	result, err := h.svc.GenerateInvoicesForClass(r.Context(), institutionID, &req)
+	if err != nil {
+		log.Error().Err(err).Msg("generate invoices for class")
+		response.Error(w, http.StatusBadRequest, "INVOICE_GENERATION_ERROR", err.Error())
+		return
+	}
+	response.Ok(w, result)
+}
+ 

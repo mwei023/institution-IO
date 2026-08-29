@@ -21,7 +21,7 @@ import (
 // in model.go for the full separation rationale (assessment/report
 // cards are NOT shared; attendance/class lookups ARE).
 type Service struct {
-	repo          *Repository
+	repo          Store
 	academicsRepo *academics.Repository
 	publisher     events.Publisher
 }

@@ -478,3 +478,72 @@ func (r *Repository) MarkStkRequestStatus(ctx context.Context, id uuid.UUID, sta
 	)
 	return err
 }
+
+func (s *Service) CreateFeeStructure(ctx context.Context, institutionID uuid.UUID, req *CreateFeeStructureRequest) (*FeeStructure, error) {
+	return s.repo.CreateFeeStructure(ctx, institutionID, req)
+}
+ 
+func (s *Service) ListFeeStructures(ctx context.Context, institutionID uuid.UUID, academicYearID *uuid.UUID) ([]*FeeStructure, error) {
+	return s.repo.ListFeeStructures(ctx, institutionID, academicYearID)
+}
+ 
+func (s *Service) AddFeeComponent(ctx context.Context, institutionID, feeStructureID uuid.UUID, req *AddFeeComponentRequest) (*FeeComponent, error) {
+	return s.repo.AddFeeComponent(ctx, institutionID, feeStructureID, req)
+}
+ 
+// GenerateInvoicesForClass creates one invoice per active student in a
+// class, built from a fee structure's components for the given term.
+// Same partial-success pattern as report card generation: a student who
+// already has an invoice for this term is skipped and recorded, not
+// treated as a batch failure — running this twice on the same class
+// (e.g. after new admissions) is safe and won't double-bill anyone.
+func (s *Service) GenerateInvoicesForClass(ctx context.Context, institutionID uuid.UUID, req *GenerateInvoicesRequest) (*GenerateInvoicesResult, error) {
+	components, err := s.repo.GetFeeComponentsForStructure(ctx, institutionID, req.FeeStructureID, req.TermNumber)
+	if err != nil {
+		return nil, fmt.Errorf("get fee components: %w", err)
+	}
+	if len(components) == 0 {
+		return nil, fmt.Errorf("fee structure has no components for term %d — add components before generating invoices", req.TermNumber)
+	}
+ 
+	students, err := s.repo.getActiveStudentIDsForClass(ctx, institutionID, req.ClassID)
+	if err != nil {
+		return nil, fmt.Errorf("get class roster: %w", err)
+	}
+ 
+	result := &GenerateInvoicesResult{
+		ClassID:       req.ClassID,
+		TermID:        req.TermID,
+		TotalStudents: len(students),
+		Skipped:       []InvoiceSkip{},
+	}
+ 
+	for _, student := range students {
+		exists, err := s.repo.InvoiceExistsForStudentTerm(ctx, institutionID, student.id, req.TermID)
+		if err != nil {
+			log.Warn().Err(err).Str("student_id", student.id.String()).Msg("skipping invoice generation — could not check existing invoice")
+			result.Skipped = append(result.Skipped, InvoiceSkip{StudentID: student.id, Reason: err.Error()})
+			continue
+		}
+		if exists {
+			result.Skipped = append(result.Skipped, InvoiceSkip{StudentID: student.id, Reason: "invoice already exists for this term"})
+			continue
+		}
+ 
+		invoiceNumber, err := s.repo.GetNextInvoiceNumber(ctx, institutionID)
+		if err != nil {
+			result.Skipped = append(result.Skipped, InvoiceSkip{StudentID: student.id, Reason: fmt.Sprintf("could not generate invoice number: %v", err)})
+			continue
+		}
+ 
+		if _, err := s.repo.CreateInvoiceWithLines(ctx, institutionID, student.id, req.TermID, invoiceNumber, components); err != nil {
+			log.Warn().Err(err).Str("student_id", student.id.String()).Msg("skipping invoice — create failed")
+			result.Skipped = append(result.Skipped, InvoiceSkip{StudentID: student.id, Reason: err.Error()})
+			continue
+		}
+		result.InvoicesCreated++
+	}
+ 
+	return result, nil
+}
+ 

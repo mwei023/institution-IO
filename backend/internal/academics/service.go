@@ -14,12 +14,12 @@ import (
 
 // Service implements all academics domain business logic.
 type Service struct {
-	repo      *Repository
+	repo      Store
 	publisher events.Publisher
 }
 
 // NewService creates a new academics service.
-func NewService(repo *Repository, publisher events.Publisher) *Service {
+func NewService(repo Store, publisher events.Publisher) *Service {
 	return &Service{repo: repo, publisher: publisher}
 }
 

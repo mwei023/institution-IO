@@ -19,6 +19,7 @@ var (
 	ErrPaymentNotFound  = errors.New("payment not found")
 	ErrStudentNotFound   = errors.New("student not found")
 	ErrDuplicateMpesaTx = errors.New("M-Pesa transaction already processed")
+	ErrFeeStructureNotFound = errors.New("fee structure not found")
 )
 
 // Repository handles database access for the finance domain.
@@ -439,3 +440,230 @@ func (r *Repository) CreatePaymentAllocation(ctx context.Context, institutionID,
 	)
 	return err
 }
+
+func (r *Repository) CreateFeeStructure(ctx context.Context, institutionID uuid.UUID, req *CreateFeeStructureRequest) (*FeeStructure, error) {
+	fs := &FeeStructure{
+		ID:             uuid.New(),
+		InstitutionID:  institutionID,
+		AcademicYearID: req.AcademicYearID,
+		ClassID:        req.ClassID,
+		Name:           req.Name,
+		IsActive:       true,
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO fee_structures (id, institution_id, academic_year_id, class_id, name, is_active, created_at)
+		VALUES ($1,$2,$3,$4,$5,true,NOW())`,
+		fs.ID, fs.InstitutionID, fs.AcademicYearID, fs.ClassID, fs.Name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create fee structure: %w", err)
+	}
+	return fs, nil
+}
+ 
+// ListFeeStructures returns active fee structures for an institution,
+// optionally filtered to one academic year.
+func (r *Repository) ListFeeStructures(ctx context.Context, institutionID uuid.UUID, academicYearID *uuid.UUID) ([]*FeeStructure, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, institution_id, academic_year_id, class_id, name, is_active
+		FROM fee_structures
+		WHERE institution_id = $1
+		  AND deleted_at IS NULL
+		  AND ($2::uuid IS NULL OR academic_year_id = $2)
+		ORDER BY name`,
+		institutionID, academicYearID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+ 
+	structures := []*FeeStructure{}
+	for rows.Next() {
+		var fs FeeStructure
+		if err := rows.Scan(&fs.ID, &fs.InstitutionID, &fs.AcademicYearID, &fs.ClassID, &fs.Name, &fs.IsActive); err != nil {
+			return nil, err
+		}
+		structures = append(structures, &fs)
+	}
+	return structures, rows.Err()
+}
+ 
+// AddFeeComponent adds a line item to an existing fee structure. Confirms
+// the structure exists and belongs to this institution first — without
+// this check, a component could be silently attached to another
+// institution's structure if the ID were guessed or mistyped.
+func (r *Repository) AddFeeComponent(ctx context.Context, institutionID, feeStructureID uuid.UUID, req *AddFeeComponentRequest) (*FeeComponent, error) {
+	var exists bool
+	if err := r.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM fee_structures WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL)`,
+		feeStructureID, institutionID,
+	).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check fee structure: %w", err)
+	}
+	if !exists {
+		return nil, ErrFeeStructureNotFound
+	}
+ 
+	fc := &FeeComponent{
+		ID:             uuid.New(),
+		FeeStructureID: feeStructureID,
+		Name:           req.Name,
+		Amount:         req.Amount,
+		TermNumber:     req.TermNumber,
+		IsMandatory:    req.IsMandatory,
+		DueDate:        req.DueDate,
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO fee_components (id, institution_id, fee_structure_id, name, amount, term_number, is_mandatory, due_date, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())`,
+		fc.ID, institutionID, fc.FeeStructureID, fc.Name, fc.Amount, fc.TermNumber, fc.IsMandatory, fc.DueDate,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("add fee component: %w", err)
+	}
+	return fc, nil
+}
+ 
+// GetFeeComponentsForStructure returns every component for a structure
+// that applies to a given term number. TermNumber IS NULL on a component
+// means it applies to every term (e.g. an annual boarding levy charged
+// once but attributed to term 1) — matched here explicitly rather than
+// left to the caller to remember.
+func (r *Repository) GetFeeComponentsForStructure(ctx context.Context, institutionID, feeStructureID uuid.UUID, termNumber int) ([]*FeeComponent, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, fee_structure_id, name, amount, term_number, is_mandatory, due_date
+		FROM fee_components
+		WHERE institution_id = $1
+		  AND fee_structure_id = $2
+		  AND (term_number IS NULL OR term_number = $3)
+		ORDER BY name`,
+		institutionID, feeStructureID, termNumber,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+ 
+	components := []*FeeComponent{}
+	for rows.Next() {
+		var fc FeeComponent
+		if err := rows.Scan(&fc.ID, &fc.FeeStructureID, &fc.Name, &fc.Amount, &fc.TermNumber, &fc.IsMandatory, &fc.DueDate); err != nil {
+			return nil, err
+		}
+		components = append(components, &fc)
+	}
+	return components, rows.Err()
+}
+ 
+// studentForInvoicing is a narrow projection — just enough to generate
+// an invoice, not a full student record.
+type studentForInvoicing struct {
+	id uuid.UUID
+}
+ 
+// getActiveStudentIDsForClass is finance's own copy of the same query
+// academics.GetActiveStudentIDsForClass already runs — duplicated
+// deliberately rather than importing academics.Repository, matching the
+// existing precedent of cbc.Service depending directly on
+// *academics.Repository being the ONE cross-package repository
+// dependency in the codebase; finance doing the same would be a second,
+// avoidable one for a three-line query.
+func (r *Repository) getActiveStudentIDsForClass(ctx context.Context, institutionID, classID uuid.UUID) ([]studentForInvoicing, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id FROM students
+		WHERE institution_id = $1 AND current_class_id = $2
+		  AND status = 'active' AND deleted_at IS NULL`,
+		institutionID, classID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+ 
+	var students []studentForInvoicing
+	for rows.Next() {
+		var s studentForInvoicing
+		if err := rows.Scan(&s.id); err != nil {
+			return nil, err
+		}
+		students = append(students, s)
+	}
+	return students, rows.Err()
+}
+ 
+// InvoiceExistsForStudentTerm checks whether a student already has any
+// invoice for this term — used to skip (not duplicate-bill) a student on
+// a second run of invoice generation, e.g. if new students join a class
+// after the first batch ran.
+func (r *Repository) InvoiceExistsForStudentTerm(ctx context.Context, institutionID, studentID, termID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM fee_invoices WHERE institution_id = $1 AND student_id = $2 AND term_id = $3 AND deleted_at IS NULL)`,
+		institutionID, studentID, termID,
+	).Scan(&exists)
+	return exists, err
+}
+ 
+// GetNextInvoiceNumber generates a sequential invoice number, same
+// pattern as GetNextReceiptNumber.
+func (r *Repository) GetNextInvoiceNumber(ctx context.Context, institutionID uuid.UUID) (string, error) {
+	var count int
+	err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM fee_invoices WHERE institution_id = $1`,
+		institutionID,
+	).Scan(&count)
+	if err != nil {
+		return "", err
+	}
+	year := time.Now().Year()
+	return fmt.Sprintf("INV/%d/%06d", year, count+1), nil
+}
+ 
+// CreateInvoiceWithLines creates one invoice plus its line items, in a
+// transaction — an invoice with zero lines, or lines whose sum doesn't
+// match the invoice total, would be a real accounting-data-integrity
+// bug, so both inserts succeed together or neither does.
+func (r *Repository) CreateInvoiceWithLines(ctx context.Context, institutionID, studentID, termID uuid.UUID, invoiceNumber string, components []*FeeComponent) (*FeeInvoice, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+ 
+	var total float64
+	for _, c := range components {
+		total += c.Amount
+	}
+ 
+	invoiceID := uuid.New()
+	_, err = tx.Exec(ctx, `
+		INSERT INTO fee_invoices (id, institution_id, student_id, term_id, invoice_number, total_amount, paid_amount, status, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,0,'unpaid',NOW())`,
+		invoiceID, institutionID, studentID, termID, invoiceNumber, total,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create invoice: %w", err)
+	}
+ 
+	for _, c := range components {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO fee_invoice_lines (id, institution_id, invoice_id, component_id, description, amount, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+			uuid.New(), institutionID, invoiceID, c.ID, c.Name, c.Amount,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create invoice line %s: %w", c.Name, err)
+		}
+	}
+ 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+ 
+	return &FeeInvoice{
+		ID: invoiceID, InstitutionID: institutionID, StudentID: studentID, TermID: termID,
+		InvoiceNumber: invoiceNumber, TotalAmount: total, Status: "unpaid",
+	}, nil
+}
+ 
