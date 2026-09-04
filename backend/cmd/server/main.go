@@ -188,6 +188,8 @@ func main() {
 				r.With(auth.RequirePermission("fees:read")).Get("/fee-structures", financeHandler.ListFeeStructures)
 				r.With(auth.RequirePermission("fees:manage")).Post("/fee-structures/{id}/components", financeHandler.AddFeeComponent)
 				r.With(auth.RequirePermission("fees:manage")).Post("/invoices/generate-class", financeHandler.GenerateInvoicesForClass)
+				r.With(auth.RequirePermission("fees:manage")).Post("/payments/{id}/allocate", financeHandler.AllocatePayment)
+				r.With(auth.RequirePermission("fees:manage")).Post("/allocations/{id}/deallocate", financeHandler.DeallocatePayment)
 			})
 
 			// Academics (8-4-4)

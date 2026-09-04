@@ -113,12 +113,47 @@ export const financeAPI = {
     api.get(`/finance/students/${studentId}/payments`),
   initiateStkPush: (data: { student_id: string; amount: number; phone: string }) =>
     api.post("/finance/pay/stk-push", data),
-  recordManualPayment: (data: Record<string, unknown>) =>
+  recordManualPayment: (data: {
+    student_id: string;
+    invoice_id?: string;
+    amount: number;
+    payment_method: "cash" | "bank_transfer" | "cheque" | "waiver";
+    bank_reference?: string;
+    cheque_number?: string;
+    notes?: string;
+    is_record_only?: boolean; // new
+  }) => 
     api.post("/finance/pay/manual", data),
   getSummary: (termId?: string) =>
     api.get("/finance/summary", { params: termId ? { term_id: termId } : {} }),
   getOutstandingBalances: () =>
     api.get("/finance/outstanding"),
+
+  // ── Fee billing (fee-structures / invoices) ──────────────────
+  // Mirrors backend/internal/finance/handler.go: CreateFeeStructure,
+  // ListFeeStructures, AddFeeComponent, GenerateInvoicesForClass.
+  createFeeStructure: (data: { academic_year_id: string; class_id?: string; name: string }) =>
+    api.post("/finance/fee-structures", data),
+  listFeeStructures: (academicYearId?: string) =>
+    api.get("/finance/fee-structures", { params: academicYearId ? { academic_year_id: academicYearId } : {} }),
+  addFeeComponent: (
+    feeStructureId: string,
+    data: { name: string; amount: number; term_number?: number; is_mandatory: boolean; due_date?: string }
+  ) => api.post(`/finance/fee-structures/${feeStructureId}/components`, data),
+  generateInvoicesForClass: (data: {
+    fee_structure_id: string;
+    class_id: string;
+    term_id: string;
+    term_number: number;
+  }) => api.post("/finance/invoices/generate-class", data),
+
+  
+ 
+  allocatePayment: (paymentId: string, data: { invoice_id: string; amount?: number }) =>
+    api.post(`/finance/payments/${paymentId}/allocate`, data),
+ 
+  deallocatePayment: (allocationId: string, reason?: string) =>
+    api.post(`/finance/allocations/${allocationId}/deallocate`, { reason }),
 };
 
 export const announcementsAPI = {

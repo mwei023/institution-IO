@@ -42,6 +42,9 @@ type FeePayment struct {
 	BankReference   *string    `json:"bank_reference,omitempty"`
 	ReceivedAt      time.Time  `json:"received_at"`
 	PDFUrl          *string    `json:"pdf_url,omitempty"`
+	IsRecordOnly bool `json:"is_record_only"`
+	Allocations     []*PaymentAllocation `json:"allocations,omitempty"`
+	UnappliedAmount float64              `json:"unapplied_amount"`
 }
 
 // StudentFeeAccount is the summary of a student's fee account.
@@ -96,6 +99,7 @@ type ManualPaymentRequest struct {
 	BankReference string     `json:"bank_reference"`
 	ChequeNumber  string     `json:"cheque_number"`
 	Notes         string     `json:"notes"`
+	IsRecordOnly  bool       `json:"is_record_only"`
 }
 
 // FeeStructure is the fee configuration for a class/year.
@@ -180,4 +184,35 @@ type InvoiceSkip struct {
 	StudentID uuid.UUID `json:"student_id"`
 	Reason    string    `json:"reason"`
 }
- 
+
+
+// PaymentAllocation is the amount of one payment applied to one invoice.
+// Previously only ever built via raw SQL inside AllocatePayment /
+// CreatePaymentAllocation — never modeled as a Go type, since nothing
+// needed to read one back until manual allocate/deallocate existed.
+type PaymentAllocation struct {
+	ID              uuid.UUID  `json:"id"`
+	InstitutionID   uuid.UUID  `json:"institution_id"`
+	PaymentID       uuid.UUID  `json:"payment_id"`
+	InvoiceID       uuid.UUID  `json:"invoice_id"`
+	AmountApplied   float64    `json:"amount_applied"`
+	IsReversed      bool       `json:"is_reversed"`
+	ReversedAt      *time.Time `json:"reversed_at,omitempty"`
+	ReversalReason  *string    `json:"reversal_reason,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+}
+
+// AllocatePaymentRequest applies an existing payment's unapplied credit to
+// a specific invoice. Amount is optional — nil allocates the full
+// remaining unapplied balance of the payment; a value allocates a partial
+// amount, leaving the rest as credit for a later allocation.
+type AllocatePaymentRequest struct {
+	InvoiceID uuid.UUID `json:"invoice_id" validate:"required"`
+	Amount    *float64  `json:"amount,omitempty"`
+}
+
+// DeallocateRequest reverses one allocation. Reason is optional but
+// recommended — stored on the allocation row itself for the audit trail.
+type DeallocateRequest struct {
+	Reason string `json:"reason"`
+}

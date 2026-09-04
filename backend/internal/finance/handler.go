@@ -260,3 +260,51 @@ func (h *Handler) GenerateInvoicesForClass(w http.ResponseWriter, r *http.Reques
 	response.Ok(w, result)
 }
  
+
+// AllocatePayment handles POST /api/v1/finance/payments/{id}/allocate
+func (h *Handler) AllocatePayment(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	paymentID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid payment ID")
+		return
+	}
+	var req AllocatePaymentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	pa, err := h.svc.AllocateExistingPayment(r.Context(), institutionID, paymentID, req.InvoiceID, req.Amount)
+	if err != nil {
+		log.Error().Err(err).Msg("allocate payment")
+		response.Error(w, http.StatusBadRequest, "ALLOCATION_ERROR", err.Error())
+		return
+	}
+	response.Created(w, pa)
+}
+ 
+// DeallocatePayment handles POST /api/v1/finance/allocations/{id}/deallocate
+func (h *Handler) DeallocatePayment(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
+	reversedBy, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+	allocationID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid allocation ID")
+		return
+	}
+	var req DeallocateRequest
+	_ = json.NewDecoder(r.Body).Decode(&req) // reason is optional, ignore decode failure on empty body
+ 
+	pa, err := h.svc.DeallocatePayment(r.Context(), institutionID, allocationID, reversedBy, req.Reason)
+	if err != nil {
+		log.Error().Err(err).Msg("deallocate payment")
+		response.Error(w, http.StatusBadRequest, "DEALLOCATION_ERROR", err.Error())
+		return
+	}
+	response.Ok(w, pa)
+}

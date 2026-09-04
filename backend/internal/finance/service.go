@@ -547,3 +547,51 @@ func (s *Service) GenerateInvoicesForClass(ctx context.Context, institutionID uu
 	return result, nil
 }
  
+var ErrAllocationExceedsUnapplied = errors.New("allocation amount exceeds the payment's unapplied balance")
+
+
+// AllocateExistingPayment applies an existing payment's unapplied credit
+// to an invoice. amount nil = allocate the full remaining unapplied
+// balance; a value allocates a partial amount, leaving the rest as
+// credit available for a later allocation.
+func (s *Service) AllocateExistingPayment(ctx context.Context, institutionID, paymentID, invoiceID uuid.UUID, amount *float64) (*PaymentAllocation, error) {
+	unapplied, err := s.repo.GetUnappliedAmount(ctx, institutionID, paymentID)
+	if err != nil {
+		return nil, err
+	}
+ 
+	amt := unapplied
+	if amount != nil {
+		amt = *amount
+	}
+	if amt <= 0 {
+		return nil, fmt.Errorf("no unapplied amount available to allocate")
+	}
+	if amt > unapplied {
+		return nil, ErrAllocationExceedsUnapplied
+	}
+ 
+	pa, err := s.repo.AllocateExistingPayment(ctx, institutionID, paymentID, invoiceID, amt)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateInvoicePaidAmount(ctx, institutionID, invoiceID); err != nil {
+		log.Error().Err(err).Str("invoice_id", invoiceID.String()).Msg("update invoice after manual allocation")
+	}
+	return pa, nil
+}
+ 
+// DeallocatePayment reverses one allocation and recalculates the
+// affected invoice's paid_amount/status. The money returns to the
+// payment's unapplied credit — it isn't removed from the account, only
+// unlinked from that particular invoice.
+func (s *Service) DeallocatePayment(ctx context.Context, institutionID, allocationID, reversedBy uuid.UUID, reason string) (*PaymentAllocation, error) {
+	pa, err := s.repo.DeallocatePayment(ctx, institutionID, allocationID, reversedBy, reason)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateInvoicePaidAmount(ctx, institutionID, pa.InvoiceID); err != nil {
+		log.Error().Err(err).Str("invoice_id", pa.InvoiceID.String()).Msg("update invoice after deallocation")
+	}
+	return pa, nil
+}

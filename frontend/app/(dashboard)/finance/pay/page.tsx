@@ -55,6 +55,11 @@ export default function RecordPaymentPage() {
   const [phone, setPhone] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer" | "cheque">("cash");
   const [invoiceId, setInvoiceId] = useState<string>("");
+  // New — replaces the old conflated "don't allocate = record only" dropdown
+  // option. Default is false: no invoice selected + not record-only means
+  // "leave as an unapplied account credit", which is a real financial state
+  // (money received) distinct from a non-financial log entry.
+  const [isRecordOnly, setIsRecordOnly] = useState(false);
   const [bankReference, setBankReference] = useState("");
   const [chequeNumber, setChequeNumber] = useState("");
   const [notes, setNotes] = useState("");
@@ -118,6 +123,7 @@ export default function RecordPaymentPage() {
     setAmount("");
     setPhone("");
     setInvoiceId("");
+    setIsRecordOnly(false);
     setBankReference("");
     setChequeNumber("");
     setNotes("");
@@ -222,6 +228,7 @@ export default function RecordPaymentPage() {
         bank_reference: bankReference || undefined,
         cheque_number: chequeNumber || undefined,
         notes: notes || undefined,
+        is_record_only: isRecordOnly,
       });
       setReceiptNumber(res.data?.data?.receipt_number ?? null);
       setStage("success");
@@ -417,7 +424,30 @@ export default function RecordPaymentPage() {
                       </div>
                     )}
 
-                    {outstandingInvoices.length > 0 && (
+                    {/* Record-only toggle — a genuinely non-financial log entry.
+                        Separate from the invoice dropdown below: this affects
+                        whether the payment counts toward the student's
+                        balance AT ALL, not which invoice it's matched to. */}
+                    <label className="flex items-start gap-2.5 rounded-md border border-neutral-200 px-3 py-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isRecordOnly}
+                        onChange={(e) => {
+                          setIsRecordOnly(e.target.checked);
+                          if (e.target.checked) setInvoiceId(""); // a non-financial entry can't be allocated
+                        }}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="text-sm text-neutral-800 block">No financial effect (record only)</span>
+                        <span className="text-xs text-neutral-500 block mt-0.5">
+                          Use this only for something already reconciled elsewhere — it won&apos;t change the
+                          student&apos;s balance or appear as a credit. Leave unchecked for a real payment received.
+                        </span>
+                      </span>
+                    </label>
+
+                    {!isRecordOnly && outstandingInvoices.length > 0 && (
                       <div>
                         <label className="text-xs font-medium text-neutral-600 block mb-1">
                           Apply to invoice (optional)
@@ -427,13 +457,17 @@ export default function RecordPaymentPage() {
                           onChange={(e) => setInvoiceId(e.target.value)}
                           className="w-full h-9 px-3 text-sm border border-neutral-200 rounded-md bg-white"
                         >
-                          <option value="">Don&apos;t allocate — record only</option>
+                          <option value="">Leave as account credit — allocate later</option>
                           {outstandingInvoices.map((inv) => (
                             <option key={inv.id} value={inv.id}>
                               {inv.invoice_number} — balance {formatKES(inv.balance)}
                             </option>
                           ))}
                         </select>
+                        <p className="text-xs text-neutral-400 mt-1">
+                          Either way, this payment reduces the student&apos;s overall balance immediately —
+                          choosing an invoice just also marks that specific invoice as paid down.
+                        </p>
                       </div>
                     )}
 

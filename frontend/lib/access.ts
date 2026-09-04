@@ -2,7 +2,7 @@ import React from "react";
 import {
   LayoutDashboard, Users, GraduationCap, BookOpen, DollarSign,
   MessageSquare, Settings, FileText, Bell, Shield, Home, Stethoscope, Bus,
-  Library, Package, Building2, UserCheck,
+  Library, Package, Building2, UserCheck, Receipt,
 } from "lucide-react";
 import type { UserProfile } from "./store";
 
@@ -24,6 +24,12 @@ export const allNavItems: NavItem[] = [
   { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
   { label: "Report Cards",   href: "/academics/cbc-report-cards", icon: FileText, permission: "grades:write", curriculum: "cbc" },
   { label: "Finance",        href: "/finance",         icon: DollarSign,     permission: "fees:read" },
+  // fees:manage (migration 012, granted to super_admin) — separate from
+  // fees:read since these create/generate billing data rather than just
+  // viewing it. Sub-routes of /finance, but given their own entries (not
+  // nested under the Finance item) since Sidebar's nav is flat.
+  { label: "Fee Structures", href: "/finance/fee-structures", icon: Receipt, permission: "fees:manage" },
+  { label: "Generate Invoices", href: "/finance/invoices", icon: FileText, permission: "fees:manage" },
   { label: "Staff",          href: "/staff",           icon: GraduationCap,  permission: "staff:read" },
   { label: "Communications", href: "/communications",  icon: MessageSquare,  permission: "announcements:read" },
   { label: "Documents",      href: "/documents",       icon: FileText,       permission: "documents:read" },

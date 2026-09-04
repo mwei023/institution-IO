@@ -20,6 +20,7 @@ var (
 	ErrStudentNotFound   = errors.New("student not found")
 	ErrDuplicateMpesaTx = errors.New("M-Pesa transaction already processed")
 	ErrFeeStructureNotFound = errors.New("fee structure not found")
+	ErrAllocationNotFound = errors.New("allocation not found or already reversed")
 )
 
 // Repository handles database access for the finance domain.
@@ -38,6 +39,15 @@ func NewRepository(db *db.Pool) *Repository {
 // Uses pre-aggregated subqueries (not direct joins) for the same reason as
 // ListStudentsWithOutstandingBalance: avoids row fan-out when a student has
 // more than one fee_payments row.
+//    unapplied_credit — real payments (not record-only, not reversed)
+//    minus whatever's already been allocated to an invoice — in
+//    addition to the existing invoice-level paid_amount subtraction.
+//
+//    unapplied_credit is computed per-payment first (a correlated
+//    subquery against payment_allocations), THEN summed per student —
+//    not a direct join — for the same fan-out reason documented on
+//    the original query: a payment with multiple partial allocations
+//    would otherwise multiply SUM(fp.amount). ────────────────────
 func (r *Repository) GetStudentFeeAccount(ctx context.Context, institutionID, studentID uuid.UUID) (*StudentFeeAccount, error) {
 	query := `
 		SELECT
@@ -45,7 +55,7 @@ func (r *Repository) GetStudentFeeAccount(ctx context.Context, institutionID, st
 			s.first_name || ' ' || s.last_name AS student_name,
 			COALESCE(inv.total_billed, 0) AS total_billed,
 			COALESCE(inv.total_paid, 0) AS total_paid,
-			COALESCE(inv.total_billed, 0) - COALESCE(inv.total_paid, 0) AS balance,
+			COALESCE(inv.total_billed, 0) - COALESCE(inv.total_paid, 0) - COALESCE(credit.unapplied_credit, 0) AS balance,
 			pay.last_payment_at
 		FROM students s
 		LEFT JOIN (
@@ -62,8 +72,25 @@ func (r *Repository) GetStudentFeeAccount(ctx context.Context, institutionID, st
 			WHERE institution_id = $1 AND deleted_at IS NULL
 			GROUP BY student_id
 		) pay ON pay.student_id = s.id
+		LEFT JOIN (
+			SELECT student_id, SUM(unapplied) AS unapplied_credit
+			FROM (
+				SELECT fp.id, fp.student_id,
+				       fp.amount - COALESCE(
+				           (SELECT SUM(pa.amount_applied) FROM payment_allocations pa
+				            WHERE pa.payment_id = fp.id AND pa.is_reversed = false),
+				           0
+				       ) AS unapplied
+				FROM fee_payments fp
+				WHERE fp.institution_id = $1
+				  AND fp.deleted_at IS NULL
+				  AND fp.is_reversed = false
+				  AND fp.is_record_only = false
+			) per_payment
+			GROUP BY student_id
+		) credit ON credit.student_id = s.id
 		WHERE s.institution_id = $1 AND s.id = $2 AND s.deleted_at IS NULL`
-
+ 
 	var acct StudentFeeAccount
 	err := r.db.QueryRow(ctx, query, institutionID, studentID).Scan(
 		&acct.StudentID, &acct.StudentName,
@@ -112,7 +139,7 @@ func (r *Repository) ListInvoicesForStudent(ctx context.Context, institutionID, 
 func (r *Repository) ListPaymentsForStudent(ctx context.Context, institutionID, studentID uuid.UUID) ([]*FeePayment, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, institution_id, student_id, invoice_id, receipt_number,
-		       amount, payment_method, mpesa_reference, bank_reference, received_at, pdf_url
+		       amount, payment_method, mpesa_reference, bank_reference, received_at, pdf_url, is_record_only
 		FROM fee_payments
 		WHERE institution_id = $1 AND student_id = $2 AND deleted_at IS NULL
 		ORDER BY received_at DESC`,
@@ -121,20 +148,72 @@ func (r *Repository) ListPaymentsForStudent(ctx context.Context, institutionID, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var payments []*FeePayment
+ 
+	payments := []*FeePayment{}
 	for rows.Next() {
 		var p FeePayment
 		if err := rows.Scan(
 			&p.ID, &p.InstitutionID, &p.StudentID, &p.InvoiceID, &p.ReceiptNumber,
 			&p.Amount, &p.PaymentMethod, &p.MpesaReference, &p.BankReference, &p.ReceivedAt, &p.PDFUrl,
+			&p.IsRecordOnly,
 		); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		payments = append(payments, &p)
 	}
-	return payments, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(payments) == 0 {
+		return payments, nil
+	}
+ 
+	paymentIDs := make([]uuid.UUID, len(payments))
+	byID := make(map[uuid.UUID]*FeePayment, len(payments))
+	for i, p := range payments {
+		paymentIDs[i] = p.ID
+		p.Allocations = []*PaymentAllocation{}
+		p.UnappliedAmount = p.Amount // starts as the full amount, reduced below
+		byID[p.ID] = p
+	}
+ 
+	allocRows, err := r.db.Query(ctx, `
+		SELECT id, institution_id, payment_id, invoice_id, amount_applied,
+		       is_reversed, reversed_at, reversal_reason, created_at
+		FROM payment_allocations
+		WHERE institution_id = $1 AND payment_id = ANY($2)
+		ORDER BY created_at`,
+		institutionID, paymentIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list payment allocations: %w", err)
+	}
+	defer allocRows.Close()
+ 
+	for allocRows.Next() {
+		var pa PaymentAllocation
+		if err := allocRows.Scan(
+			&pa.ID, &pa.InstitutionID, &pa.PaymentID, &pa.InvoiceID, &pa.AmountApplied,
+			&pa.IsReversed, &pa.ReversedAt, &pa.ReversalReason, &pa.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		p, ok := byID[pa.PaymentID]
+		if !ok {
+			continue
+		}
+		p.Allocations = append(p.Allocations, &pa)
+		if !pa.IsReversed {
+			p.UnappliedAmount -= pa.AmountApplied
+		}
+	}
+	if err := allocRows.Err(); err != nil {
+		return nil, err
+	}
+ 
+	return payments, nil
 }
 
 // CreatePayment inserts a fee payment record.
@@ -143,10 +222,11 @@ func (r *Repository) CreatePayment(ctx context.Context, p *FeePayment) error {
 		INSERT INTO fee_payments (
 			id, institution_id, student_id, invoice_id, receipt_number,
 			amount, payment_method, mpesa_reference, bank_reference,
-			received_at, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())`,
+			is_record_only, received_at, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`,
 		p.ID, p.InstitutionID, p.StudentID, p.InvoiceID, p.ReceiptNumber,
-		p.Amount, p.PaymentMethod, p.MpesaReference, p.BankReference, p.ReceivedAt,
+		p.Amount, p.PaymentMethod, p.MpesaReference, p.BankReference,
+		p.IsRecordOnly, p.ReceivedAt,
 	)
 	return err
 }
@@ -160,6 +240,7 @@ func (r *Repository) UpdateInvoicePaidAmount(ctx context.Context, institutionID,
 			JOIN fee_payments fp ON fp.id = pa.payment_id
 			WHERE pa.invoice_id = $2
 			  AND pa.institution_id = $1
+			  AND pa.is_reversed = false
 			  AND fp.deleted_at IS NULL
 			  AND fp.is_reversed = false
 		)
@@ -327,7 +408,7 @@ func (r *Repository) ListStudentsWithOutstandingBalance(ctx context.Context, ins
 			c.name AS class_name,
 			inv.total_billed,
 			inv.total_paid,
-			inv.total_billed - inv.total_paid AS balance,
+			inv.total_billed - inv.total_paid - COALESCE(credit.unapplied_credit, 0) AS balance,
 			pay.last_payment_at
 		FROM students s
 		LEFT JOIN classes c ON c.id = s.current_class_id
@@ -345,9 +426,26 @@ func (r *Repository) ListStudentsWithOutstandingBalance(ctx context.Context, ins
 			WHERE institution_id = $1 AND deleted_at IS NULL
 			GROUP BY student_id
 		) pay ON pay.student_id = s.id
+		LEFT JOIN (
+			SELECT student_id, SUM(unapplied) AS unapplied_credit
+			FROM (
+				SELECT fp.id, fp.student_id,
+				       fp.amount - COALESCE(
+				           (SELECT SUM(pa.amount_applied) FROM payment_allocations pa
+				            WHERE pa.payment_id = fp.id AND pa.is_reversed = false),
+				           0
+				       ) AS unapplied
+				FROM fee_payments fp
+				WHERE fp.institution_id = $1
+				  AND fp.deleted_at IS NULL
+				  AND fp.is_reversed = false
+				  AND fp.is_record_only = false
+			) per_payment
+			GROUP BY student_id
+		) credit ON credit.student_id = s.id
 		WHERE s.institution_id = $1
 		  AND s.deleted_at IS NULL
-		  AND (inv.total_billed - inv.total_paid) > 0
+		  AND (inv.total_billed - inv.total_paid - COALESCE(credit.unapplied_credit, 0)) > 0
 		ORDER BY balance DESC`,
 		institutionID,
 	)
@@ -355,7 +453,7 @@ func (r *Repository) ListStudentsWithOutstandingBalance(ctx context.Context, ins
 		return nil, fmt.Errorf("list outstanding balances: %w", err)
 	}
 	defer rows.Close()
-
+ 
 	var result []*StudentBalance
 	for rows.Next() {
 		var b StudentBalance
@@ -463,6 +561,22 @@ func (r *Repository) CreateFeeStructure(ctx context.Context, institutionID uuid.
  
 // ListFeeStructures returns active fee structures for an institution,
 // optionally filtered to one academic year.
+// ListFeeStructures returns active fee structures for an institution,
+// optionally filtered to one academic year — each with its components
+// attached.
+//
+// Fetches components in a single second query across every returned
+// structure ID (an IN/ANY, not a query-per-structure loop) and groups
+// them in Go. The original version only ever selected the base
+// fee_structures columns, so Components was always nil regardless of
+// what AddFeeComponent had actually inserted — AddFeeComponent itself
+// was working correctly the whole time.
+//
+// NOTE: assumes fee_components has no deleted_at column, matching what
+// AddFeeComponent's INSERT list shows (id, institution_id,
+// fee_structure_id, name, amount, term_number, is_mandatory, due_date,
+// created_at — no deleted_at). If fee_components does have a soft-delete
+// column, add `AND deleted_at IS NULL` to the second query below.
 func (r *Repository) ListFeeStructures(ctx context.Context, institutionID uuid.UUID, academicYearID *uuid.UUID) ([]*FeeStructure, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, institution_id, academic_year_id, class_id, name, is_active
@@ -476,17 +590,60 @@ func (r *Repository) ListFeeStructures(ctx context.Context, institutionID uuid.U
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
- 
+
 	structures := []*FeeStructure{}
 	for rows.Next() {
 		var fs FeeStructure
 		if err := rows.Scan(&fs.ID, &fs.InstitutionID, &fs.AcademicYearID, &fs.ClassID, &fs.Name, &fs.IsActive); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		structures = append(structures, &fs)
 	}
-	return structures, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(structures) == 0 {
+		return structures, nil
+	}
+
+	structureIDs := make([]uuid.UUID, len(structures))
+	byID := make(map[uuid.UUID]*FeeStructure, len(structures))
+	for i, fs := range structures {
+		structureIDs[i] = fs.ID
+		fs.Components = []*FeeComponent{} // default to empty, not nil, once we know the structure exists
+		byID[fs.ID] = fs
+	}
+
+	compRows, err := r.db.Query(ctx, `
+		SELECT id, fee_structure_id, name, amount, term_number, is_mandatory, due_date
+		FROM fee_components
+		WHERE institution_id = $1
+		  AND fee_structure_id = ANY($2)
+		ORDER BY name`,
+		institutionID, structureIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list fee components: %w", err)
+	}
+	defer compRows.Close()
+
+	for compRows.Next() {
+		var fc FeeComponent
+		if err := compRows.Scan(&fc.ID, &fc.FeeStructureID, &fc.Name, &fc.Amount, &fc.TermNumber, &fc.IsMandatory, &fc.DueDate); err != nil {
+			return nil, err
+		}
+		if fs, ok := byID[fc.FeeStructureID]; ok {
+			fs.Components = append(fs.Components, &fc)
+		}
+	}
+	if err := compRows.Err(); err != nil {
+		return nil, err
+	}
+
+	return structures, nil
 }
  
 // AddFeeComponent adds a line item to an existing fee structure. Confirms
@@ -667,3 +824,71 @@ func (r *Repository) CreateInvoiceWithLines(ctx context.Context, institutionID, 
 	}, nil
 }
  
+func (r *Repository) GetUnappliedAmount(ctx context.Context, institutionID, paymentID uuid.UUID) (float64, error) {
+	var amount, applied float64
+	err := r.db.QueryRow(ctx, `
+		SELECT fp.amount,
+		       COALESCE((SELECT SUM(pa.amount_applied) FROM payment_allocations pa
+		                 WHERE pa.payment_id = fp.id AND pa.is_reversed = false), 0)
+		FROM fee_payments fp
+		WHERE fp.id = $1 AND fp.institution_id = $2 AND fp.deleted_at IS NULL`,
+		paymentID, institutionID,
+	).Scan(&amount, &applied)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrPaymentNotFound
+		}
+		return 0, err
+	}
+	return amount - applied, nil
+}
+ 
+// AllocateExistingPayment applies (some or all of) an already-recorded
+// payment's unapplied credit to a specific invoice, chosen explicitly by
+// whoever is allocating it — unlike AllocatePayment (M-Pesa's oldest-
+// invoice-first auto-allocation across possibly many invoices), this
+// always targets exactly one invoice.
+func (r *Repository) AllocateExistingPayment(ctx context.Context, institutionID, paymentID, invoiceID uuid.UUID, amount float64) (*PaymentAllocation, error) {
+	pa := &PaymentAllocation{
+		ID:            uuid.New(),
+		InstitutionID: institutionID,
+		PaymentID:     paymentID,
+		InvoiceID:     invoiceID,
+		AmountApplied: amount,
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO payment_allocations (id, institution_id, payment_id, invoice_id, amount_applied, is_reversed, created_at)
+		VALUES ($1,$2,$3,$4,$5,false,NOW())`,
+		pa.ID, pa.InstitutionID, pa.PaymentID, pa.InvoiceID, pa.AmountApplied,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("allocate payment: %w", err)
+	}
+	return pa, nil
+}
+ 
+// DeallocatePayment reverses one allocation — marks it reversed rather
+// than deleting it, so the audit trail survives and the same payment can
+// later be reallocated (as a fresh row) without losing the history of
+// the first attempt.
+func (r *Repository) DeallocatePayment(ctx context.Context, institutionID, allocationID, reversedBy uuid.UUID, reason string) (*PaymentAllocation, error) {
+	var pa PaymentAllocation
+	var reasonArg interface{}
+	if reason != "" {
+		reasonArg = reason
+	}
+	err := r.db.QueryRow(ctx, `
+		UPDATE payment_allocations
+		SET is_reversed = true, reversed_at = NOW(), reversed_by = $3, reversal_reason = $4
+		WHERE id = $1 AND institution_id = $2 AND is_reversed = false
+		RETURNING id, institution_id, payment_id, invoice_id, amount_applied, is_reversed, reversed_at, created_at`,
+		allocationID, institutionID, reversedBy, reasonArg,
+	).Scan(&pa.ID, &pa.InstitutionID, &pa.PaymentID, &pa.InvoiceID, &pa.AmountApplied, &pa.IsReversed, &pa.ReversedAt, &pa.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrAllocationNotFound
+		}
+		return nil, fmt.Errorf("deallocate payment: %w", err)
+	}
+	return &pa, nil
+}
