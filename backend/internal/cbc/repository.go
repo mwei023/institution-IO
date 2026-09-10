@@ -50,7 +50,14 @@ func (r *Repository) CreateLearningArea(ctx context.Context, institutionID uuid.
 		IsCompulsory:  req.IsCompulsory,
 		Source:        "institution",
 	}
-	err := r.db.QueryRow(ctx, `
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin create learning area: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	err = tx.QueryRow(ctx, `
 		INSERT INTO learning_areas (id, institution_id, name, code, is_compulsory, source, created_at)
 		VALUES ($1,$2,$3,$4,$5,'institution',NOW())
 		RETURNING created_at`,
@@ -58,6 +65,23 @@ func (r *Repository) CreateLearningArea(ctx context.Context, institutionID uuid.
 	).Scan(&la.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create learning area: %w", err)
+	}
+
+	// teaching_assignments (migration 000014) references
+	// academic_offerings, not learning_areas directly — a learning area
+	// with no offering can never be assigned to a teacher. Every
+	// learning area now gets a matching offering from birth, in the
+	// same transaction, so this gap can't reopen for future rows.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO academic_offerings (institution_id, learning_area_id)
+		VALUES ($1, $2)`,
+		institutionID, la.ID,
+	); err != nil {
+		return nil, fmt.Errorf("create academic offering for learning area: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create learning area: %w", err)
 	}
 	return la, nil
 }
@@ -330,17 +354,41 @@ func (r *Repository) CreateTeacherAssignment(ctx context.Context, institutionID 
 		ID: uuid.New(), InstitutionID: institutionID, ClassID: classID,
 		LearningAreaID: learningAreaID, TeacherID: teacherID, TermID: termID,
 	}
+
+	// Resolve (or self-heal) the academic_offerings row for this
+	// learning area. CreateLearningArea now creates this at birth, but
+	// this upsert covers any learning area that predates that fix —
+	// ON CONFLICT ... DO UPDATE (a no-op assignment) forces RETURNING
+	// to fire on conflict too, so this is one round trip either way,
+	// no race between a concurrent check-then-insert.
+	var offeringID uuid.UUID
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO learning_area_teacher_assignments
-			(id, institution_id, class_id, learning_area_id, teacher_id, term_id, created_at)
+		INSERT INTO academic_offerings (institution_id, learning_area_id)
+		VALUES ($1, $2)
+		ON CONFLICT (learning_area_id) DO UPDATE SET learning_area_id = EXCLUDED.learning_area_id
+		RETURNING id`,
+		institutionID, learningAreaID,
+	).Scan(&offeringID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve academic offering for learning area %s: %w", learningAreaID, err)
+	}
+
+	// Was: INSERT INTO learning_area_teacher_assignments (...). Now
+	// writes to teaching_assignments — the one real assignment
+	// mechanism shared with 8-4-4 (see checkpoint #32). The returned
+	// TeacherAssignment struct's shape is unchanged; only the storage
+	// underneath it moved.
+	err = r.db.QueryRow(ctx, `
+		INSERT INTO teaching_assignments
+			(id, institution_id, class_id, academic_offering_id, teacher_id, term_id, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,NOW())
-		ON CONFLICT (institution_id, class_id, learning_area_id, term_id)
+		ON CONFLICT (institution_id, class_id, academic_offering_id, term_id)
 		DO UPDATE SET teacher_id = EXCLUDED.teacher_id
 		RETURNING created_at`,
-		ta.ID, ta.InstitutionID, ta.ClassID, ta.LearningAreaID, ta.TeacherID, ta.TermID,
+		ta.ID, ta.InstitutionID, ta.ClassID, offeringID, ta.TeacherID, ta.TermID,
 	).Scan(&ta.CreatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("create teacher assignment: %w", err)
+		return nil, fmt.Errorf("create teaching assignment: %w", err)
 	}
 	return ta, nil
 }

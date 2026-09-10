@@ -66,23 +66,24 @@ export default function TeacherCbcGradesPage() {
 
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+ useEffect(() => {
   Promise.all([
     academicsAPI.listClasses(),
-    academicsAPI.listSubjects(),
+    cbcAPI.listLearningAreas(),
     academicsAPI.listTerms(),
   ])
-    .then(([clRes, subRes, termRes]) => {
+    .then(([clRes, laRes, termRes]) => {
       setClasses(clRes.data?.data ?? []);
-      setSubjects(subRes.data?.data ?? []);
+      setLearningAreas(laRes.data?.data ?? []);
       const termList = termRes.data?.data ?? [];
       setTerms(termList);
       const current = termList.find((t: any) => t.is_current);
       if (current) setSelectedTerm(current.id);
     })
-    .catch(() => setError("Could not load classes, subjects, and terms."))
+    .catch(() => setError("Could not load classes, learning areas, and terms."))
     .finally(() => setSelectLoading(false));
 }, []);
+
 
   const handleCreateLearningArea = async () => {
     if (!newLAName) {

@@ -216,6 +216,9 @@ func main() {
 				r.With(auth.RequirePermission("classes:write")).Post("/classes/{id}/assign-teacher", academicsHandler.AssignClassTeacher)
 				r.With(auth.RequirePermission("classes:write")).Get("/teachers", academicsHandler.ListTeachers)
 				r.With(auth.RequirePermission("classes:write")).Get("/academic-years", academicsHandler.ListAcademicYears)
+				r.With(auth.RequirePermission("classes:write")).Post("/teaching-assignments", academicsHandler.CreateTeachingAssignment)
+				r.With(auth.RequirePermission("classes:write")).Get("/classes/{id}/teaching-assignments", academicsHandler.ListTeachingAssignmentsForClass)
+				r.With(auth.RequirePermission("classes:write")).Post("/timetable-periods", academicsHandler.CreateTimetablePeriod)
 			})
 
 			// CBC v1.0 academic layer — separate route group, separate

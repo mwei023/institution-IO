@@ -20,6 +20,7 @@ var (
 	ErrReportCardNotFound = errors.New("report card not found")
 	ErrReportCardPublished = errors.New("report card already published — unpublish before regenerating")
 	ErrGradeComponentNotFound = errors.New("grade component not found")  
+	ErrTimetablePeriodNotFound = errors.New("timetable period not found")
 )
 
 // Repository handles database access for the academics domain.
@@ -130,15 +131,21 @@ func (r *Repository) ListSubjects(ctx context.Context, institutionID uuid.UUID) 
 func (r *Repository) GetTimetableForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TimetablePeriod, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT tp.id, tp.institution_id, tp.term_id, tp.class_id,
-		       tp.subject_id, tp.teacher_id,
-		       sub.name AS subject_name,
-		       u.first_name || ' ' || u.last_name AS teacher_name,
+		       tp.teaching_assignment_id,
+		       ta.teacher_id,
+		       u.first_name || ' ' || u.last_name,
+		       COALESCE(sub.name, la.name),
+		       CASE WHEN sub.id IS NOT NULL THEN 'subject'
+		            WHEN la.id IS NOT NULL THEN 'learning_area' END,
 		       tp.day_of_week, tp.period_number,
 		       to_char(tp.start_time, 'HH24:MI'), to_char(tp.end_time, 'HH24:MI'),
 		       tp.room, tp.is_published
 		FROM timetable_periods tp
-		JOIN subjects sub ON sub.id = tp.subject_id
-		JOIN users u ON u.id = tp.teacher_id
+		LEFT JOIN teaching_assignments ta ON ta.id = tp.teaching_assignment_id
+		LEFT JOIN academic_offerings ao ON ao.id = ta.academic_offering_id
+		LEFT JOIN subjects sub ON sub.id = ao.subject_id
+		LEFT JOIN learning_areas la ON la.id = ao.learning_area_id
+		LEFT JOIN users u ON u.id = ta.teacher_id
 		WHERE tp.institution_id = $1
 		  AND tp.class_id = $2
 		  AND tp.term_id = $3
@@ -150,14 +157,14 @@ func (r *Repository) GetTimetableForClass(ctx context.Context, institutionID, cl
 		return nil, err
 	}
 	defer rows.Close()
-
+ 
 	var periods []*TimetablePeriod
 	for rows.Next() {
 		var p TimetablePeriod
 		if err := rows.Scan(
 			&p.ID, &p.InstitutionID, &p.TermID, &p.ClassID,
-			&p.SubjectID, &p.TeacherID,
-			&p.SubjectName, &p.TeacherName,
+			&p.TeachingAssignmentID, &p.TeacherID, &p.TeacherName,
+			&p.OfferingName, &p.OfferingType,
 			&p.DayOfWeek, &p.PeriodNumber,
 			&p.StartTime, &p.EndTime,
 			&p.Room, &p.IsPublished,
@@ -168,21 +175,27 @@ func (r *Repository) GetTimetableForClass(ctx context.Context, institutionID, cl
 	}
 	return periods, rows.Err()
 }
-
+ 
 func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, teacherID, termID uuid.UUID) ([]*TimetablePeriod, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT tp.id, tp.institution_id, tp.term_id, tp.class_id,
-		       tp.subject_id, tp.teacher_id,
-		       sub.name AS subject_name,
-		       u.first_name || ' ' || u.last_name AS teacher_name,
+		       tp.teaching_assignment_id,
+		       ta.teacher_id,
+		       u.first_name || ' ' || u.last_name,
+		       COALESCE(sub.name, la.name),
+		       CASE WHEN sub.id IS NOT NULL THEN 'subject'
+		            WHEN la.id IS NOT NULL THEN 'learning_area' END,
 		       tp.day_of_week, tp.period_number,
 		       to_char(tp.start_time, 'HH24:MI'), to_char(tp.end_time, 'HH24:MI'),
 		       tp.room, tp.is_published
 		FROM timetable_periods tp
-		JOIN subjects sub ON sub.id = tp.subject_id
-		JOIN users u ON u.id = tp.teacher_id
+		JOIN teaching_assignments ta ON ta.id = tp.teaching_assignment_id
+		LEFT JOIN academic_offerings ao ON ao.id = ta.academic_offering_id
+		LEFT JOIN subjects sub ON sub.id = ao.subject_id
+		LEFT JOIN learning_areas la ON la.id = ao.learning_area_id
+		LEFT JOIN users u ON u.id = ta.teacher_id
 		WHERE tp.institution_id = $1
-		  AND tp.teacher_id = $2
+		  AND ta.teacher_id = $2
 		  AND tp.term_id = $3
 		  AND tp.deleted_at IS NULL
 		ORDER BY tp.day_of_week, tp.period_number`,
@@ -192,14 +205,14 @@ func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, 
 		return nil, err
 	}
 	defer rows.Close()
-
+ 
 	var periods []*TimetablePeriod
 	for rows.Next() {
 		var p TimetablePeriod
 		if err := rows.Scan(
 			&p.ID, &p.InstitutionID, &p.TermID, &p.ClassID,
-			&p.SubjectID, &p.TeacherID,
-			&p.SubjectName, &p.TeacherName,
+			&p.TeachingAssignmentID, &p.TeacherID, &p.TeacherName,
+			&p.OfferingName, &p.OfferingType,
 			&p.DayOfWeek, &p.PeriodNumber,
 			&p.StartTime, &p.EndTime,
 			&p.Room, &p.IsPublished,
@@ -210,6 +223,7 @@ func (r *Repository) GetTimetableForTeacher(ctx context.Context, institutionID, 
 	}
 	return periods, rows.Err()
 }
+
 
 // ─── Attendance ───────────────────────────────────────────────────
 
@@ -449,17 +463,19 @@ func (r *Repository) GetGradeComponentByID(ctx context.Context, institutionID, c
 func (r *Repository) TeacherIsTimetabledForSubjectInClass(ctx context.Context, institutionID, teacherID, classID, subjectID, termID uuid.UUID) (bool, error) {
 	var count int
 	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM timetable_periods
-		WHERE institution_id = $1
-		  AND teacher_id = $2
-		  AND class_id = $3
-		  AND subject_id = $4
-		  AND term_id = $5
-		  AND deleted_at IS NULL`,
+		SELECT COUNT(*)
+		FROM teaching_assignments ta
+		JOIN academic_offerings ao ON ao.id = ta.academic_offering_id
+		WHERE ta.institution_id = $1
+		  AND ta.teacher_id = $2
+		  AND ta.class_id = $3
+		  AND ao.subject_id = $4
+		  AND ta.term_id = $5
+		  AND ta.deleted_at IS NULL`,
 		institutionID, teacherID, classID, subjectID, termID,
 	).Scan(&count)
 	if err != nil {
-		return false, fmt.Errorf("check timetable assignment: %w", err)
+		return false, fmt.Errorf("check teaching assignment: %w", err)
 	}
 	return count > 0, nil
 }
@@ -1159,4 +1175,187 @@ func (r *Repository) ListAcademicYears(ctx context.Context, institutionID uuid.U
 		years = append(years, &ay)
 	}
 	return years, rows.Err()
+}
+// academics/repository.go — new method
+// CreateTeachingAssignment resolves (or self-heals) the subject's
+// academic_offerings row, then creates or updates the teaching
+// assignment. Subjects are seed-only today (no CreateSubject handler
+// exists), so migration 014's one-time backfill should already cover
+// every subject — but this doesn't assume that stays true forever,
+// same defensive pattern used in cbc.Repository.CreateTeacherAssignment
+// for the identical gap on the learning-area side.
+func (r *Repository) CreateTeachingAssignment(ctx context.Context, institutionID uuid.UUID, req *CreateTeachingAssignmentRequest) (*TeachingAssignment, error) {
+	var offeringID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO academic_offerings (institution_id, subject_id)
+		VALUES ($1, $2)
+		ON CONFLICT (subject_id) DO UPDATE SET subject_id = EXCLUDED.subject_id
+		RETURNING id`,
+		institutionID, req.SubjectID,
+	).Scan(&offeringID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve academic offering for subject %s: %w", req.SubjectID, err)
+	}
+
+	ta := &TeachingAssignment{
+		ID: uuid.New(), InstitutionID: institutionID, ClassID: req.ClassID,
+		AcademicOfferingID: offeringID, TeacherID: req.TeacherID, TermID: req.TermID,
+	}
+	err = r.db.QueryRow(ctx, `
+		INSERT INTO teaching_assignments
+			(id, institution_id, class_id, academic_offering_id, teacher_id, term_id, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,NOW())
+		ON CONFLICT (institution_id, class_id, academic_offering_id, term_id)
+		DO UPDATE SET teacher_id = EXCLUDED.teacher_id
+		RETURNING created_at`,
+		ta.ID, ta.InstitutionID, ta.ClassID, ta.AcademicOfferingID, ta.TeacherID, ta.TermID,
+	).Scan(&ta.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create teaching assignment: %w", err)
+	}
+	return ta, nil
+}
+
+// academics/repository.go — additions
+
+var (
+	ErrSlotAlreadyBooked   = errors.New("this class already has a lesson scheduled in this slot")
+	ErrTeacherDoubleBooked = errors.New("this teacher is already scheduled elsewhere at this day and period")
+)
+
+// ListTeachingAssignmentsForClass returns every teaching assignment for
+// a class+term, resolved to a display-ready offering name and teacher
+// name — powers the "which lesson is this period?" picker when
+// scheduling. Curriculum-neutral: works identically whether the
+// offering behind the assignment is a subject or a learning area.
+func (r *Repository) ListTeachingAssignmentsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TeachingAssignmentOption, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT ta.id,
+		       COALESCE(sub.name, la.name)                          AS offering_name,
+		       CASE WHEN ao.subject_id IS NOT NULL THEN 'subject' ELSE 'learning_area' END AS offering_type,
+		       ta.teacher_id,
+		       u.first_name || ' ' || u.last_name                   AS teacher_name
+		FROM teaching_assignments ta
+		JOIN academic_offerings ao ON ao.id = ta.academic_offering_id
+		LEFT JOIN subjects sub      ON sub.id = ao.subject_id
+		LEFT JOIN learning_areas la ON la.id = ao.learning_area_id
+		JOIN users u ON u.id = ta.teacher_id
+		WHERE ta.institution_id = $1 AND ta.class_id = $2 AND ta.term_id = $3
+		  AND ta.deleted_at IS NULL
+		ORDER BY offering_name`,
+		institutionID, classID, termID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list teaching assignments for class: %w", err)
+	}
+	defer rows.Close()
+
+	options := []*TeachingAssignmentOption{}
+	for rows.Next() {
+		var o TeachingAssignmentOption
+		if err := rows.Scan(&o.ID, &o.OfferingName, &o.OfferingType, &o.TeacherID, &o.TeacherName); err != nil {
+			return nil, err
+		}
+		options = append(options, &o)
+	}
+	return options, rows.Err()
+}
+
+// CreateTimetablePeriod schedules a teaching assignment into a specific
+// day/period slot. Two conflicts are checked inside one transaction,
+// before the insert, since timetable_periods has NO unique constraint
+// preventing either at the database level (confirmed against the live
+// schema — see checkpoint follow-up):
+//
+//  1. Slot conflict: this exact class already has a different lesson
+//     scheduled in this term/day/period.
+//  2. Teacher conflict: the teacher behind teaching_assignment_id is
+//     already scheduled somewhere else (any class) at this exact
+//     term/day/period.
+//
+// SELECT ... FOR UPDATE serializes concurrent create calls against the
+// same slot so two simultaneous requests can't both pass the check and
+// both insert — the DB has no constraint to catch that race, so the
+// code has to.
+func (r *Repository) CreateTimetablePeriod(ctx context.Context, institutionID uuid.UUID, req *CreateTimetablePeriodRequest) (*TimetablePeriod, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin create timetable period: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Resolve the teacher behind this assignment — needed for the
+	// cross-class double-booking check below.
+	var teacherID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT teacher_id FROM teaching_assignments
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		req.TeachingAssignmentID, institutionID,
+	).Scan(&teacherID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("teaching assignment not found")
+		}
+		return nil, fmt.Errorf("resolve teaching assignment: %w", err)
+	}
+
+	// Lock and check: is this class's slot already taken?
+	var slotCount int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM timetable_periods
+		WHERE institution_id = $1 AND class_id = $2 AND term_id = $3
+		  AND day_of_week = $4 AND period_number = $5 AND deleted_at IS NULL
+		FOR UPDATE`,
+		institutionID, req.ClassID, req.TermID, req.DayOfWeek, req.PeriodNumber,
+	).Scan(&slotCount)
+	if err != nil {
+		return nil, fmt.Errorf("check slot conflict: %w", err)
+	}
+	if slotCount > 0 {
+		return nil, ErrSlotAlreadyBooked
+	}
+
+	// Is this teacher already teaching a different class at this exact
+	// day/period, this term?
+	var teacherCount int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM timetable_periods tp
+		JOIN teaching_assignments ta ON ta.id = tp.teaching_assignment_id
+		WHERE tp.institution_id = $1 AND tp.term_id = $2
+		  AND tp.day_of_week = $3 AND tp.period_number = $4
+		  AND tp.deleted_at IS NULL AND ta.deleted_at IS NULL
+		  AND ta.teacher_id = $5`,
+		institutionID, req.TermID, req.DayOfWeek, req.PeriodNumber, teacherID,
+	).Scan(&teacherCount)
+	if err != nil {
+		return nil, fmt.Errorf("check teacher conflict: %w", err)
+	}
+	if teacherCount > 0 {
+		return nil, ErrTeacherDoubleBooked
+	}
+
+	p := &TimetablePeriod{
+		ID: uuid.New(), InstitutionID: institutionID, TermID: req.TermID, ClassID: req.ClassID,
+		TeachingAssignmentID: &req.TeachingAssignmentID,
+		DayOfWeek: req.DayOfWeek, PeriodNumber: req.PeriodNumber,
+		StartTime: req.StartTime, EndTime: req.EndTime, Room: req.Room,
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO timetable_periods
+			(id, institution_id, term_id, class_id, teaching_assignment_id,
+			 day_of_week, period_number, start_time, end_time, room, is_published, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,NOW(),NOW())
+		RETURNING is_published`,
+		p.ID, p.InstitutionID, p.TermID, p.ClassID, p.TeachingAssignmentID,
+		p.DayOfWeek, p.PeriodNumber, p.StartTime, p.EndTime, p.Room,
+	).Scan(&p.IsPublished)
+	if err != nil {
+		return nil, fmt.Errorf("create timetable period: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create timetable period: %w", err)
+	}
+	return p, nil
 }

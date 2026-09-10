@@ -19,6 +19,8 @@ type Store interface {
 	CreateClass(ctx context.Context, institutionID uuid.UUID, req *CreateClassRequest) (*Class, error)
 	AssignClassTeacher(ctx context.Context, institutionID, classID, teacherID uuid.UUID) error
 	ListTeachers(ctx context.Context, institutionID uuid.UUID) ([]*TeacherOption, error)
+	// academics/store.go — add to Store interface
+	CreateTeachingAssignment(ctx context.Context, institutionID uuid.UUID, req *CreateTeachingAssignmentRequest) (*TeachingAssignment, error)
 	ListAcademicYears(ctx context.Context, institutionID uuid.UUID) ([]*AcademicYear, error)
 
 	// Subjects
@@ -61,4 +63,8 @@ type Store interface {
 
 	// Dashboard (defined in dashboard.go, not repository.go)
 	GetInstitutionAttendanceToday(ctx context.Context, institutionID uuid.UUID, date time.Time) (*InstitutionAttendanceToday, error)
+
+	// academics/store.go — add to Store interface
+	ListTeachingAssignmentsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TeachingAssignmentOption, error)
+	CreateTimetablePeriod(ctx context.Context, institutionID uuid.UUID, req *CreateTimetablePeriodRequest) (*TimetablePeriod, error)
 }

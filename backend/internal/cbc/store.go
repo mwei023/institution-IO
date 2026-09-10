@@ -29,7 +29,6 @@ type Store interface {
 
 	CreateTeacherAssignment(ctx context.Context, institutionID uuid.UUID, classID, learningAreaID, teacherID, termID uuid.UUID) (*TeacherAssignment, error)
 	TeacherHasLearningAreaAssignment(ctx context.Context, institutionID, teacherID, classID uuid.UUID) (bool, error)
-
 	GetRatingBands(ctx context.Context, institutionID uuid.UUID, curriculumType string, gradeBand *string) ([]*RatingBand, error)
 	GetStudentNames(ctx context.Context, institutionID uuid.UUID, studentIDs []uuid.UUID) (map[uuid.UUID]string, error)
 

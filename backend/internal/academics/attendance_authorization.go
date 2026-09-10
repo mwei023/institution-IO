@@ -19,15 +19,6 @@ var ErrNotClassTeacher = errors.New("only this class's assigned class teacher ca
 // period-type attendance for it.
 var ErrNotAssignedToClass = errors.New("you are not timetabled to teach this class")
 
-// TeacherHasAssignmentInClass checks whether a teacher has any timetable
-// period in this class at all, active or historical. This is a coarse
-// guard — it confirms the teacher teaches *something* in this class, not
-// that they're timetabled for the specific subject/period being taken
-// right now. Tightening that further needs the period being submitted
-// against to be identified explicitly in the request (it isn't yet —
-// TakeAttendanceRequest has no period_id/subject_id field), which is
-// part of the same subject_enrollments gap noted in TODO.md.
-
 // ErrClassNeedsTeacherAssignment is returned when daily attendance is
 // attempted for a class with no assigned class teacher, by anyone
 // lacking attendance:approve. The absence of a class teacher is a setup
@@ -36,12 +27,21 @@ var ErrNotAssignedToClass = errors.New("you are not timetabled to teach this cla
 // hole for as long as the class stays unassigned.
 var ErrClassNeedsTeacherAssignment = errors.New("this class has no assigned class teacher — an administrator must assign one before daily attendance can be taken")
 
+// TeacherHasAssignmentInClass checks whether a teacher has any teaching
+// assignment in this class at all. Previously checked
+// timetable_periods.teacher_id directly — that column no longer exists;
+// teaching_assignments is now the actual source of truth for "who
+// teaches what," independent of whether a specific timetable slot has
+// been scheduled yet.
 func (r *Repository) TeacherHasAssignmentInClass(ctx context.Context, institutionID, teacherID, classID uuid.UUID) (bool, error) {
 	var count int
 	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM timetable_periods
-		WHERE institution_id = $1 AND teacher_id = $2 AND class_id = $3
-		  AND deleted_at IS NULL`,
+		SELECT COUNT(*)
+		FROM teaching_assignments ta
+		WHERE ta.institution_id = $1
+		  AND ta.teacher_id = $2
+		  AND ta.class_id = $3
+		  AND ta.deleted_at IS NULL`,
 		institutionID, teacherID, classID,
 	).Scan(&count)
 	if err != nil {
@@ -52,23 +52,34 @@ func (r *Repository) TeacherHasAssignmentInClass(ctx context.Context, institutio
 
 // TimetablePeriodInfo is the minimal shape SubmitAttendance needs to
 // validate a period-attendance request against the actual timetable.
+// TeacherID and SubjectID are now nullable — they're resolved through
+// teaching_assignment_id, which every existing period currently lacks
+// following this session's migration recovery (see checkpoint). A nil
+// TeacherID means "this period isn't linked to an assignment yet," not
+// "no teacher" — callers must treat that as unknown, not as a pass.
 type TimetablePeriodInfo struct {
 	ID        uuid.UUID
 	ClassID   uuid.UUID
-	TeacherID uuid.UUID
-	SubjectID uuid.UUID
+	TeacherID *uuid.UUID
+	SubjectID *uuid.UUID
 }
 
 // GetTimetablePeriodByID fetches the class/teacher/subject a specific
 // timetable period belongs to, so period-attendance can be validated
-// against the exact lesson being taken — not just "teaches something
-// in this class at some point," which TeacherHasAssignmentInClass checks.
+// against the exact lesson being taken. SubjectID stays nil for a CBC
+// (learning-area-based) period — this struct only ever represents the
+// 8-4-4/subject case when populated, since nothing currently calling
+// this needs to distinguish the two; if that changes, this needs an
+// OfferingType field the same way the display-facing TimetablePeriod
+// (in model.go) already has.
 func (r *Repository) GetTimetablePeriodByID(ctx context.Context, institutionID, periodID uuid.UUID) (*TimetablePeriodInfo, error) {
 	var p TimetablePeriodInfo
 	err := r.db.QueryRow(ctx, `
-		SELECT id, class_id, teacher_id, subject_id
-		FROM timetable_periods
-		WHERE institution_id = $1 AND id = $2 AND deleted_at IS NULL`,
+		SELECT tp.id, tp.class_id, ta.teacher_id, ao.subject_id
+		FROM timetable_periods tp
+		LEFT JOIN teaching_assignments ta ON ta.id = tp.teaching_assignment_id
+		LEFT JOIN academic_offerings ao ON ao.id = ta.academic_offering_id
+		WHERE tp.institution_id = $1 AND tp.id = $2 AND tp.deleted_at IS NULL`,
 		institutionID, periodID,
 	).Scan(&p.ID, &p.ClassID, &p.TeacherID, &p.SubjectID)
 	if err != nil {

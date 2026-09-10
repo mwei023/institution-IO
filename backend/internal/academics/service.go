@@ -162,9 +162,13 @@ func (s *Service) SubmitAttendance(ctx context.Context, institutionID, teacherID
     if period.ClassID != req.ClassID {
         return nil, fmt.Errorf("this period does not belong to the specified class")
     }
-    if period.TeacherID != teacherID && !canOverrideClassTeacher {
-        return nil, ErrNotAssignedToClass
-    }
+    if period.TeacherID == nil {
+		if !canOverrideClassTeacher {
+			return nil, ErrNotAssignedToClass
+		}
+	} else if *period.TeacherID != teacherID && !canOverrideClassTeacher {
+		return nil, ErrNotAssignedToClass
+	}
 }
  
 	// Validate every student in the request actually belongs to this class,
@@ -401,4 +405,24 @@ func (s *Service) ListTeachers(ctx context.Context, institutionID uuid.UUID) ([]
 
 func (s *Service) ListAcademicYears(ctx context.Context, institutionID uuid.UUID) ([]*AcademicYear, error) {
 	return s.repo.ListAcademicYears(ctx, institutionID)
+}
+
+
+var ErrOfferingMustBeExactlyOne = errors.New("exactly one of subject_id or learning_area_id is required")
+
+func (s *Service) CreateTeachingAssignment(ctx context.Context, institutionID uuid.UUID, req *CreateTeachingAssignmentRequest) (*TeachingAssignment, error) {
+	hasSubject := req.SubjectID != nil
+	hasLearningArea := req.LearningAreaID != nil
+	if hasSubject == hasLearningArea {
+		return nil, ErrOfferingMustBeExactlyOne
+	}
+	return s.repo.CreateTeachingAssignment(ctx, institutionID, req)
+}
+
+func (s *Service) ListTeachingAssignmentsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TeachingAssignmentOption, error) {
+	return s.repo.ListTeachingAssignmentsForClass(ctx, institutionID, classID, termID)
+}
+
+func (s *Service) CreateTimetablePeriod(ctx context.Context, institutionID uuid.UUID, req *CreateTimetablePeriodRequest) (*TimetablePeriod, error) {
+	return s.repo.CreateTimetablePeriod(ctx, institutionID, req)
 }

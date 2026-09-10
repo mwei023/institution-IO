@@ -555,3 +555,63 @@ func (h *Handler) ListAcademicYears(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Ok(w, years)
 }
+// academics/handler.go
+func (h *Handler) CreateTeachingAssignment(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var req CreateTeachingAssignmentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	ta, err := h.svc.CreateTeachingAssignment(r.Context(), institutionID, &req)
+	if err != nil {
+		log.Error().Err(err).Msg("create teaching assignment")
+		response.Error(w, http.StatusBadRequest, "ASSIGNMENT_ERROR", err.Error())
+		return
+	}
+	response.Created(w, ta)
+}
+
+// academics/handler.go — additions
+func (h *Handler) ListTeachingAssignmentsForClass(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	classID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid class ID")
+		return
+	}
+	termID, err := uuid.Parse(r.URL.Query().Get("term_id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_TERM_ID", "Valid term_id is required")
+		return
+	}
+	options, err := h.svc.ListTeachingAssignmentsForClass(r.Context(), institutionID, classID, termID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, options)
+}
+
+func (h *Handler) CreateTimetablePeriod(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var req CreateTimetablePeriodRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	p, err := h.svc.CreateTimetablePeriod(r.Context(), institutionID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSlotAlreadyBooked):
+			response.Error(w, http.StatusConflict, "SLOT_BOOKED", err.Error())
+		case errors.Is(err, ErrTeacherDoubleBooked):
+			response.Error(w, http.StatusConflict, "TEACHER_DOUBLE_BOOKED", err.Error())
+		default:
+			log.Error().Err(err).Msg("create timetable period")
+			response.Error(w, http.StatusBadRequest, "PERIOD_ERROR", err.Error())
+		}
+		return
+	}
+	response.Created(w, p)
+}

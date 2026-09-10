@@ -62,7 +62,7 @@ func (s *Service) GetEntries(ctx context.Context, institutionID, teacherID uuid.
 		if err != nil {
 			return nil, err
 		}
-		assigned, err := s.repo.TeacherHasLearningAreaAssignment(ctx, institutionID, teacherID, classID)
+		assigned, err := s.academicsRepo.TeacherHasAssignmentInClass(ctx, institutionID, teacherID, classID)
 		if err != nil {
 			return nil, err
 		}
@@ -84,7 +84,7 @@ func (s *Service) SaveEntries(ctx context.Context, institutionID, teacherID uuid
 	if err != nil {
 		return err
 	}
-	assigned, err := s.repo.TeacherHasLearningAreaAssignment(ctx, institutionID, teacherID, classID)
+	assigned, err := s.academicsRepo.TeacherHasAssignmentInClass(ctx, institutionID, teacherID, classID)
 	if err != nil {
 		return err
 	}

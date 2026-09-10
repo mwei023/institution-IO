@@ -33,20 +33,21 @@ type Subject struct {
 }
 
 type TimetablePeriod struct {
-	ID            uuid.UUID `json:"id"`
-	InstitutionID uuid.UUID `json:"institution_id"`
-	TermID        uuid.UUID `json:"term_id"`
-	ClassID       uuid.UUID `json:"class_id"`
-	SubjectID     uuid.UUID `json:"subject_id"`
-	TeacherID     uuid.UUID `json:"teacher_id"`
-	SubjectName   string    `json:"subject_name"`
-	TeacherName   string    `json:"teacher_name"`
-	DayOfWeek     int       `json:"day_of_week"`
-	PeriodNumber  int       `json:"period_number"`
-	StartTime     string    `json:"start_time"`
-	EndTime       string    `json:"end_time"`
-	Room          *string   `json:"room,omitempty"`
-	IsPublished   bool      `json:"is_published"`
+	ID                   uuid.UUID  `json:"id"`
+	InstitutionID        uuid.UUID  `json:"institution_id"`
+	TermID               uuid.UUID  `json:"term_id"`
+	ClassID              uuid.UUID  `json:"class_id"`
+	TeachingAssignmentID *uuid.UUID `json:"teaching_assignment_id,omitempty"`
+	TeacherID            *uuid.UUID `json:"teacher_id,omitempty"`
+	TeacherName          *string    `json:"teacher_name,omitempty"`
+	OfferingName         *string    `json:"offering_name,omitempty"`
+	OfferingType         *string    `json:"offering_type,omitempty"` // "subject" | "learning_area"
+	DayOfWeek            int        `json:"day_of_week"`
+	PeriodNumber         int        `json:"period_number"`
+	StartTime            string     `json:"start_time"`
+	EndTime              string     `json:"end_time"`
+	Room                 *string    `json:"room,omitempty"`
+	IsPublished          bool       `json:"is_published"`
 }
 
 type AttendanceSession struct {
@@ -245,4 +246,54 @@ type AcademicYear struct {
 	StartDate     time.Time `json:"start_date"`
 	EndDate       time.Time `json:"end_date"`
 	IsCurrent     bool      `json:"is_current"`
+}
+
+// academics/model.go — new request/response shapes
+// academics/model.go — new request/response shapes
+//
+// CreateTeachingAssignmentRequest accepts exactly one of SubjectID or
+// LearningAreaID — mirrors academic_offerings' own check constraint.
+// Validated in Service.CreateTeachingAssignment, not via struct tags,
+// since "exactly one of two optional fields" isn't expressible with
+// validator's built-in rules alone.
+type CreateTeachingAssignmentRequest struct {
+	ClassID        uuid.UUID  `json:"class_id" validate:"required"`
+	SubjectID      *uuid.UUID `json:"subject_id,omitempty"`
+	LearningAreaID *uuid.UUID `json:"learning_area_id,omitempty"`
+	TeacherID      uuid.UUID  `json:"teacher_id" validate:"required"`
+	TermID         uuid.UUID  `json:"term_id" validate:"required"`
+}
+
+type TeachingAssignment struct {
+	ID                 uuid.UUID `json:"id"`
+	InstitutionID      uuid.UUID `json:"institution_id"`
+	ClassID            uuid.UUID `json:"class_id"`
+	AcademicOfferingID uuid.UUID `json:"academic_offering_id"`
+	TeacherID          uuid.UUID `json:"teacher_id"`
+	TermID             uuid.UUID `json:"term_id"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+// TeachingAssignmentOption is the display-ready shape for populating a
+// "which lesson is this period?" dropdown when creating a timetable
+// period — resolves the offering (subject or learning area) and
+// teacher name so the frontend never has to make three separate calls
+// to build one <select>.
+type TeachingAssignmentOption struct {
+	ID           uuid.UUID `json:"id"`
+	OfferingName string    `json:"offering_name"`
+	OfferingType string    `json:"offering_type"` // "subject" | "learning_area"
+	TeacherID    uuid.UUID `json:"teacher_id"`
+	TeacherName  string    `json:"teacher_name"`
+}
+
+type CreateTimetablePeriodRequest struct {
+	ClassID              uuid.UUID `json:"class_id" validate:"required"`
+	TermID               uuid.UUID `json:"term_id" validate:"required"`
+	TeachingAssignmentID uuid.UUID `json:"teaching_assignment_id" validate:"required"`
+	DayOfWeek            int       `json:"day_of_week" validate:"required,min=1,max=5"`
+	PeriodNumber         int       `json:"period_number" validate:"required,min=1,max=10"`
+	StartTime            string    `json:"start_time" validate:"required"` // "HH:MM", 24h
+	EndTime              string    `json:"end_time" validate:"required"`
+	Room                 *string   `json:"room,omitempty"`
 }

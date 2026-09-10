@@ -229,7 +229,24 @@ export const academicsAPI = {
   listTerms: () => api.get("/academics/terms"),
   getMyTimetable: (termId?: string) =>
     api.get("/academics/my-timetable", { params: termId ? { term_id: termId } : {} }),
+
+  // frontend/lib/api.ts — add to academicsAPI
+createTeachingAssignment: (data: {
+  class_id: string; subject_id: string; teacher_id: string; term_id: string;
+}) => api.post("/academics/teaching-assignments", data),
+
+ // frontend/lib/api.ts — additions to academicsAPI
+  listTeachingAssignmentsForClass: (classId: string, termId: string) =>
+    api.get(`/academics/classes/${classId}/teaching-assignments`, { params: { term_id: termId } }),
+  createTimetablePeriod: (data: {
+    class_id: string; term_id: string; teaching_assignment_id: string;
+    day_of_week: number; period_number: number; start_time: string; end_time: string; room?: string;
+  }) => api.post("/academics/timetable-periods", data),
+  // frontend/lib/api.ts — one more addition to academicsAPI
+getClassTimetable: (classId: string, termId?: string) =>
+  api.get(`/academics/classes/${classId}/timetable`, { params: termId ? { term_id: termId } : {} }),
 };
+
 
 export const cbcAPI = {
   listLearningAreas: () => api.get("/cbc/learning-areas"),
@@ -256,7 +273,7 @@ export const cbcAPI = {
     api.post("/cbc/report-cards/publish", data),
   unpublishReportCard: (data: { student_id: string; term_id: string }) =>
     api.post("/cbc/report-cards/unpublish", data),
-};
+}
 
 export const parentAPI = {
   getChildren: () => api.get("/parent/children"),
@@ -271,3 +288,4 @@ export const parentAPI = {
 export const institutionAPI = {
   getContext: () => api.get("/institution/context"),
 };
+
