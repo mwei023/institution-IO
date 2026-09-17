@@ -14,6 +14,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Guard — require staging secrets
+        env:
+          HOST: ${{ secrets.STAGING_HOST }}
+          USER: ${{ secrets.STAGING_USER }}
+          KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          if [[ -z "$HOST" || -z "$USER" || -z "$KEY" ]]; then
+            echo "::error::Staging secrets not configured (STAGING_HOST / STAGING_USER / STAGING_SSH_KEY). Set them in Settings → Secrets and variables → Actions to enable staging deploys."
+            exit 1
+          fi
+
+      - name: Wait for CI to pass on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 60); do
+            STATUS=$(gh run list --repo "${{ github.repository }}" --workflow=ci.yml --commit "${{ github.sha }}" \
+              --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion // "-")"')
+            echo "CI status: $STATUS"
+            case "$STATUS" in
+              "completed success") exit 0 ;;
+              completed*) echo "::error::CI did not pass for this commit: $STATUS"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for CI (10 min)"
+          exit 1
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:

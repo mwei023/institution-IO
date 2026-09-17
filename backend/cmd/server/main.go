@@ -420,9 +420,9 @@ func stubHandler(module string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte(fmt.Sprintf(
+		_, _ = fmt.Fprintf(w,
 			`{"error":{"code":"NOT_IMPLEMENTED","message":"The %s module is not yet implemented in this phase."}}`,
 			module,
-		)))
+		)
 	}
 }

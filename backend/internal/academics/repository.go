@@ -364,7 +364,7 @@ func (r *Repository) SaveAttendanceRecords(ctx context.Context, institutionID, s
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, entry := range entries {
 		var remarks interface{} = nil
@@ -557,7 +557,7 @@ func (r *Repository) SaveGradeEntries(ctx context.Context, institutionID, compon
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, entry := range entries {
 		_, err := tx.Exec(ctx, `
@@ -1316,7 +1316,7 @@ func (r *Repository) CreateTimetablePeriod(ctx context.Context, institutionID uu
 	if err != nil {
 		return nil, fmt.Errorf("begin create timetable period: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Resolve the teacher behind this assignment — needed for the
 	// cross-class double-booking check below.
@@ -1446,7 +1446,7 @@ func (r *Repository) CreateScheduleProfile(ctx context.Context, institutionID uu
 	if err != nil {
 		return nil, fmt.Errorf("begin create schedule profile: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if req.IsDefault {
 		if _, err := tx.Exec(ctx, `
@@ -1521,7 +1521,7 @@ func (r *Repository) CreateScheduleSlot(ctx context.Context, institutionID, prof
 	if err != nil {
 		return nil, fmt.Errorf("begin create schedule slot: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var profileIDCheck uuid.UUID
 	err = tx.QueryRow(ctx, `
@@ -1623,7 +1623,7 @@ func (r *Repository) CreateScheduleSlotsBulk(ctx context.Context, institutionID,
 	if err != nil {
 		return nil, fmt.Errorf("begin bulk create schedule slots: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var profileIDCheck uuid.UUID
 	err = tx.QueryRow(ctx, `
@@ -1680,7 +1680,7 @@ func (r *Repository) CopyScheduleDay(ctx context.Context, institutionID, profile
 	if err != nil {
 		return nil, fmt.Errorf("begin copy schedule day: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var profileIDCheck uuid.UUID
 	err = tx.QueryRow(ctx, `
@@ -1775,7 +1775,7 @@ func (r *Repository) PropagateScheduleSlot(ctx context.Context, institutionID, s
 	if err != nil {
 		return nil, fmt.Errorf("begin propagate schedule slot: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var src ScheduleSlot
 	err = tx.QueryRow(ctx, `
@@ -1953,7 +1953,7 @@ func (r *Repository) UpdateScheduleSlot(ctx context.Context, institutionID, slot
 	if err != nil {
 		return nil, fmt.Errorf("begin update schedule slot: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var s ScheduleSlot
 	err = tx.QueryRow(ctx, `
@@ -2105,7 +2105,7 @@ func (r *Repository) UpsertLessonRequirement(ctx context.Context, institutionID,
 	if err != nil {
 		return nil, fmt.Errorf("begin upsert lesson requirement: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var id uuid.UUID
 	err = tx.QueryRow(ctx, `

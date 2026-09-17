@@ -398,7 +398,7 @@ func pairwiseSittingIssues(sittings []*ExamSitting, groups map[uuid.UUID][]*Pape
 			if a.s.ExamDate != b.s.ExamDate {
 				continue
 			}
-			if !(a.start.Before(b.end) && b.start.Before(a.end)) {
+			if !a.start.Before(b.end) || !b.start.Before(a.end) {
 				continue
 			}
 			if shared := sharedClass(groups[a.s.ExamPaperID], groups[b.s.ExamPaperID]); len(shared) > 0 {

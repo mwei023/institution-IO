@@ -73,7 +73,7 @@ func (c *Client) GetAccessToken(ctx context.Context, consumerKey, consumerSecret
 	if err != nil {
 		return "", fmt.Errorf("daraja auth: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var tr tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
@@ -148,7 +148,7 @@ func (c *Client) InitiateSTKPush(ctx context.Context, creds ChannelCredentials, 
 	if err != nil {
 		return nil, fmt.Errorf("stk push request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

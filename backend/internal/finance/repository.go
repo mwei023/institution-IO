@@ -287,7 +287,7 @@ func (r *Repository) GetNextReceiptNumber(ctx context.Context, institutionID uui
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, institutionID.String()); err != nil {
 		return "", err
 	}
@@ -799,7 +799,7 @@ func (r *Repository) GetNextInvoiceNumber(ctx context.Context, institutionID uui
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, "inv_"+institutionID.String()); err != nil {
 		return "", err
 	}
@@ -846,7 +846,7 @@ func (r *Repository) CreateInvoiceWithLines(ctx context.Context, institutionID, 
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
  
 	var total float64
 	for _, c := range components {

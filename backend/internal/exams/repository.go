@@ -229,7 +229,7 @@ func (r *Repository) CreateSitting(ctx context.Context, institutionID, sessionID
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Serialize concurrent creates for this session so overlapping
 	// check-then-insert pairs cannot both succeed.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, sessionID.String()); err != nil {

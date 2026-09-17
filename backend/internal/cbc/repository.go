@@ -69,7 +69,7 @@ func (r *Repository) CreateLearningArea(ctx context.Context, institutionID uuid.
 	if err != nil {
 		return nil, fmt.Errorf("begin create learning area: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO learning_areas (id, institution_id, name, code, is_compulsory, source, created_at)
@@ -285,7 +285,7 @@ func (r *Repository) SaveEntries(ctx context.Context, institutionID, componentID
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, entry := range entries {
 		_, err := tx.Exec(ctx, `

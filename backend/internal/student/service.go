@@ -49,11 +49,6 @@ func (s *Service) CreateAdmission(ctx context.Context, institutionID uuid.UUID, 
 		return nil, err
 	}
 
-	nationality := req.Nationality
-	if nationality == "" {
-		nationality = "Kenyan"
-	}
-
 	admission := &Admission{
 		ID:                uuid.New(),
 		InstitutionID:     institutionID,

@@ -298,7 +298,7 @@ func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "NO_FILE", "No file provided in form field 'file'")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	title := r.FormValue("title")
 	if title == "" {
