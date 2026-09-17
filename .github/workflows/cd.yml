@@ -52,12 +52,13 @@ jobs:
           script: |
             set -e
             cd /opt/institution-os
+            REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
 
-            # Pull latest images
+            # Pull latest images (repo name must be lowercase for ghcr)
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-            docker pull ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
-            docker pull ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
+            docker pull ghcr.io/$REPO_LC/backend:${{ github.sha }}
+            docker pull ghcr.io/$REPO_LC/frontend:${{ github.sha }}
 
             # Update image tags in compose
             sed -i "s|backend:.*|backend:${{ github.sha }}|g" docker-compose.prod.yml

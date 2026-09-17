@@ -179,6 +179,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute lowercase image repository
+        id: img
+        run: echo "repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -195,8 +199,8 @@ jobs:
           context: ./backend
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/backend:latest
+            ghcr.io/${{ steps.img.outputs.repo }}/backend:${{ github.sha }}
+            ghcr.io/${{ steps.img.outputs.repo }}/backend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -206,7 +210,7 @@ jobs:
           context: ./frontend
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/frontend:latest
+            ghcr.io/${{ steps.img.outputs.repo }}/frontend:${{ github.sha }}
+            ghcr.io/${{ steps.img.outputs.repo }}/frontend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
