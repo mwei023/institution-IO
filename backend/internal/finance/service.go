@@ -15,14 +15,61 @@ import (
 
 // Service implements all finance domain business logic.
 type Service struct {
-	repo        *Repository
-	mpesaClient *mpesa.Client
+	repo        Store
+	mpesaClient MpesaClient
 	publisher   events.Publisher
 	callbackURL string
 }
 
+// MpesaClient is the subset of *mpesa.Client this service depends on,
+// expressed as an interface so tests can stub Daraja without network.
+type MpesaClient interface {
+	InitiateSTKPush(ctx context.Context, creds mpesa.ChannelCredentials, callbackURL, phone, accountRef string, amount int64) (*mpesa.STKPushResponse, error)
+}
+
+// Store is every repository operation the finance service performs.
+// Consumer-side interface (same pattern as cbc.Store): production wiring
+// passes *Repository, tests pass a mock — the service was previously
+// untestable against a concrete *Repository.
+type Store interface {
+	IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error)
+	GetStudentFeeAccount(ctx context.Context, institutionID, studentID uuid.UUID) (*StudentFeeAccount, error)
+	ListInvoicesForStudent(ctx context.Context, institutionID, studentID uuid.UUID) ([]*FeeInvoice, error)
+	ListPaymentsForStudent(ctx context.Context, institutionID, studentID uuid.UUID) ([]*FeePayment, error)
+	GetInvoiceByID(ctx context.Context, institutionID, invoiceID uuid.UUID) (*FeeInvoice, error)
+
+	GetDefaultChannel(ctx context.Context, institutionID uuid.UUID) (*PaymentChannel, error)
+	CreateStkRequest(ctx context.Context, req *StkRequest) error
+	GetStkRequestByCheckoutID(ctx context.Context, checkoutRequestID string) (*StkRequest, error)
+	MarkStkRequestStatus(ctx context.Context, id uuid.UUID, status string) error
+	StoreMpesaTransaction(ctx context.Context, institutionID uuid.UUID, tx *MpesaTransaction, rawPayload []byte) error
+	IsMpesaReceiptProcessed(ctx context.Context, institutionID uuid.UUID, receiptNumber string) (bool, error)
+	MarkMpesaTransactionProcessed(ctx context.Context, institutionID uuid.UUID, receiptNumber string, paymentID uuid.UUID) error
+
+	GetNextReceiptNumber(ctx context.Context, institutionID uuid.UUID) (string, error)
+	CreatePayment(ctx context.Context, p *FeePayment) error
+	AllocatePayment(ctx context.Context, institutionID, studentID, paymentID uuid.UUID, amount float64) ([]uuid.UUID, error)
+	CreatePaymentAllocation(ctx context.Context, institutionID, paymentID, invoiceID uuid.UUID, amount float64) error
+	UpdateInvoicePaidAmount(ctx context.Context, institutionID, invoiceID uuid.UUID) error
+	GetUnappliedAmount(ctx context.Context, institutionID, paymentID uuid.UUID) (float64, error)
+	AllocateExistingPayment(ctx context.Context, institutionID, paymentID, invoiceID uuid.UUID, amount float64) (*PaymentAllocation, error)
+	DeallocatePayment(ctx context.Context, institutionID, allocationID, reversedBy uuid.UUID, reason string) (*PaymentAllocation, error)
+
+	GetFeeCollectionSummary(ctx context.Context, institutionID uuid.UUID, termID *uuid.UUID) (map[string]interface{}, error)
+	ListStudentsWithOutstandingBalance(ctx context.Context, institutionID uuid.UUID) ([]*StudentBalance, error)
+
+	CreateFeeStructure(ctx context.Context, institutionID uuid.UUID, req *CreateFeeStructureRequest) (*FeeStructure, error)
+	ListFeeStructures(ctx context.Context, institutionID uuid.UUID, academicYearID *uuid.UUID) ([]*FeeStructure, error)
+	AddFeeComponent(ctx context.Context, institutionID, feeStructureID uuid.UUID, req *AddFeeComponentRequest) (*FeeComponent, error)
+	GetFeeComponentsForStructure(ctx context.Context, institutionID, feeStructureID uuid.UUID, termNumber int) ([]*FeeComponent, error)
+	getActiveStudentIDsForClass(ctx context.Context, institutionID, classID uuid.UUID) ([]studentForInvoicing, error)
+	InvoiceExistsForStudentTerm(ctx context.Context, institutionID, studentID, termID uuid.UUID) (bool, error)
+	GetNextInvoiceNumber(ctx context.Context, institutionID uuid.UUID) (string, error)
+	CreateInvoiceWithLines(ctx context.Context, institutionID, studentID, termID uuid.UUID, invoiceNumber string, components []*FeeComponent) (*FeeInvoice, error)
+}
+
 // NewService creates a new finance service.
-func NewService(repo *Repository, mpesaClient *mpesa.Client, publisher events.Publisher, callbackURL string) *Service {
+func NewService(repo Store, mpesaClient MpesaClient, publisher events.Publisher, callbackURL string) *Service {
 	return &Service{repo: repo, mpesaClient: mpesaClient, publisher: publisher, callbackURL: callbackURL}
 }
 
