@@ -117,14 +117,28 @@ func (h *Handler) InitiateSTKPush(w http.ResponseWriter, r *http.Request) {
 // Called by Safaricom Daraja — no JWT auth. Attribution comes from OUR
 // stk-request record keyed by CheckoutRequestID (never from the payload),
 // unknown checkout IDs are logged + accepted without effect (idempotent),
-// and a shared secret (X-Callback-Secret) gates spoofed callbacks when
-// MPESA_CALLBACK_SECRET is set. Pilot P0-3: set the secret in production;
-// empty secret logs a loud warning and accepts (sandbox onboarding only).
+// and a shared secret gates spoofed callbacks when MPESA_CALLBACK_SECRET
+// is set. The secret is accepted from EITHER the X-Callback-Secret header
+// OR a ?callback_secret= query param — stock Daraja sends no custom
+// headers, so production deployments should register the callback URL
+// WITH the secret embedded:
+//
+//	https://host/api/v1/finance/mpesa/callback?callback_secret=<MPESA_CALLBACK_SECRET>
+//
+// (Daraja echoes the registered URL's query string back on the callback.
+// The query param keeps the secret out of body payloads — where Daraja
+// echoes arbitrary content — and works within their URL registration
+// model. The header path covers callers that can send headers, e.g. a
+// future direct-to-Daraja integration or internal smoke tests.)
 // MpesaCallback handles POST /api/v1/finance/mpesa/callback
 func (h *Handler) MpesaCallback(w http.ResponseWriter, r *http.Request) {
 	if h.callbackSecret != "" {
-		if r.Header.Get("X-Callback-Secret") != h.callbackSecret {
-			log.Warn().Str("remote", r.RemoteAddr).Msg("mpesa callback rejected — bad secret")
+		provided := r.Header.Get("X-Callback-Secret")
+		if provided == "" {
+			provided = r.URL.Query().Get("callback_secret")
+		}
+		if provided != h.callbackSecret {
+			log.Warn().Str("remote", r.RemoteAddr).Msg("mpesa callback rejected — bad or missing secret")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
