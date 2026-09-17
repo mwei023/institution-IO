@@ -11,6 +11,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Next standalone runtime expects ./public to exist even if the app
+# ships no static assets — create it so the runner COPY can't fail.
+RUN mkdir -p public
+
 ENV NEXT_TELEMETRY_DISABLED 1
 ENV NODE_ENV production
 
