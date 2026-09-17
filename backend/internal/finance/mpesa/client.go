@@ -75,9 +75,20 @@ func (c *Client) GetAccessToken(ctx context.Context, consumerKey, consumerSecret
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Daraja returns 4xx/5xx with a JSON error body; without this check a
+	// failed auth silently produced an empty token and the STK push went
+	// out with "Bearer " — failing much later with a confusing error.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("daraja auth failed: %s — %s", resp.Status, string(body))
+	}
+
 	var tr tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
 		return "", fmt.Errorf("daraja auth decode: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return "", fmt.Errorf("daraja auth returned empty access token")
 	}
 	return tr.AccessToken, nil
 }
