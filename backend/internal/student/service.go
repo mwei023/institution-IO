@@ -49,6 +49,14 @@ func (s *Service) CreateAdmission(ctx context.Context, institutionID uuid.UUID, 
 		return nil, err
 	}
 
+	// The admissions table column defaults to 'Kenyan'; persisting the
+	// request value explicitly here is what lets enrollment carry it
+	// through to the student record instead of guessing later.
+	nationality := req.Nationality
+	if nationality == "" {
+		nationality = "Kenyan"
+	}
+
 	admission := &Admission{
 		ID:                uuid.New(),
 		InstitutionID:     institutionID,
@@ -59,6 +67,7 @@ func (s *Service) CreateAdmission(ctx context.Context, institutionID uuid.UUID, 
 		LastName:          req.LastName,
 		DateOfBirth:       dob,
 		Gender:            req.Gender,
+		Nationality:       nationality,
 		Status:            "submitted",
 		CreatedAt:         time.Now(),
 	}
@@ -160,12 +169,14 @@ func (s *Service) EnrollStudent(ctx context.Context, institutionID, admissionID 
 		LastName:        admission.LastName,
 		DateOfBirth:     admission.DateOfBirth,
 		Gender:          admission.Gender,
-		Nationality:     "Kenyan",
-		Status:          "active",
-		AdmissionDate:   time.Now(),
-		CurrentClassID:  &req.ClassID,
-		IsBoarder:       req.BedID != nil,
-		UsesTransport:   req.RouteID != nil,
+		// Carried from the admission application — never hardcoded. The
+		// fallback covers rows created before nationality was persisted.
+		Nationality:    defaultString(admission.Nationality, "Kenyan"),
+		Status:         "active",
+		AdmissionDate:  time.Now(),
+		CurrentClassID: &req.ClassID,
+		IsBoarder:      req.BedID != nil,
+		UsesTransport:  req.RouteID != nil,
 	}
 
 	if err := s.repo.CreateStudent(ctx, student); err != nil {
@@ -223,4 +234,12 @@ func (s *Service) GetStudentParents(ctx context.Context, institutionID, studentI
 // GetMyChildren returns all students linked to the logged-in parent user.
 func (s *Service) GetMyChildren(ctx context.Context, institutionID, parentUserID uuid.UUID) ([]*ChildSummary, error) {
 	return s.repo.GetChildrenForParent(ctx, institutionID, parentUserID)
+}
+
+// defaultString returns s if non-empty, otherwise fallback.
+func defaultString(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }

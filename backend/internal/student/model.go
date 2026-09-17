@@ -8,31 +8,31 @@ import (
 
 // Student is the full student profile.
 type Student struct {
-	ID                      uuid.UUID  `json:"id"`
-	InstitutionID           uuid.UUID  `json:"institution_id"`
-	AdmissionNumber         string     `json:"admission_number"`
-	FirstName               string     `json:"first_name"`
-	LastName                string     `json:"last_name"`
-	OtherNames              *string    `json:"other_names,omitempty"`
-	DateOfBirth             time.Time  `json:"date_of_birth"`
-	Gender                  string     `json:"gender"`
-	BirthCertificateNumber  *string    `json:"birth_certificate_number,omitempty"`
-	Nationality             string     `json:"nationality"`
-	BloodGroup              *string    `json:"blood_group,omitempty"`
-	HomeAddress             *string    `json:"home_address,omitempty"`
-	PhotoURL                *string    `json:"photo_url,omitempty"`
-	CurrentClassID          *uuid.UUID `json:"current_class_id,omitempty"`
-	AdmissionDate           time.Time  `json:"admission_date"`
-	KCPEIndexNumber         *string    `json:"kcpe_index_number,omitempty"`
-	KCPEMarks               *int       `json:"kcpe_marks,omitempty"`
-	KNECRegistrationNumber  *string    `json:"knec_registration_number,omitempty"`
-	Status                  string     `json:"status"`
-	IsBoarder               bool       `json:"is_boarder"`
-	UsesTransport           bool       `json:"uses_transport"`
-	MedicalConditions       *string    `json:"medical_conditions,omitempty"`
-	Allergies               *string    `json:"allergies,omitempty"`
-	CreatedAt               time.Time  `json:"created_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	ID                     uuid.UUID  `json:"id"`
+	InstitutionID          uuid.UUID  `json:"institution_id"`
+	AdmissionNumber        string     `json:"admission_number"`
+	FirstName              string     `json:"first_name"`
+	LastName               string     `json:"last_name"`
+	OtherNames             *string    `json:"other_names,omitempty"`
+	DateOfBirth            time.Time  `json:"date_of_birth"`
+	Gender                 string     `json:"gender"`
+	BirthCertificateNumber *string    `json:"birth_certificate_number,omitempty"`
+	Nationality            string     `json:"nationality"`
+	BloodGroup             *string    `json:"blood_group,omitempty"`
+	HomeAddress            *string    `json:"home_address,omitempty"`
+	PhotoURL               *string    `json:"photo_url,omitempty"`
+	CurrentClassID         *uuid.UUID `json:"current_class_id,omitempty"`
+	AdmissionDate          time.Time  `json:"admission_date"`
+	KCPEIndexNumber        *string    `json:"kcpe_index_number,omitempty"`
+	KCPEMarks              *int       `json:"kcpe_marks,omitempty"`
+	KNECRegistrationNumber *string    `json:"knec_registration_number,omitempty"`
+	Status                 string     `json:"status"`
+	IsBoarder              bool       `json:"is_boarder"`
+	UsesTransport          bool       `json:"uses_transport"`
+	MedicalConditions      *string    `json:"medical_conditions,omitempty"`
+	Allergies              *string    `json:"allergies,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 // StudentListItem is a compact student representation for list views.
@@ -58,6 +58,7 @@ type Admission struct {
 	LastName          string     `json:"last_name"`
 	DateOfBirth       time.Time  `json:"date_of_birth"`
 	Gender            string     `json:"gender"`
+	Nationality       string     `json:"nationality"`
 	Status            string     `json:"status"`
 	ReviewedBy        *uuid.UUID `json:"reviewed_by,omitempty"`
 	ReviewedAt        *time.Time `json:"reviewed_at,omitempty"`
@@ -100,9 +101,9 @@ type ApproveAdmissionRequest struct {
 
 // EnrollStudentRequest triggers enrollment after admission fee is paid.
 type EnrollStudentRequest struct {
-	ClassID   uuid.UUID `json:"class_id" validate:"required"`
-	BedID     *uuid.UUID `json:"bed_id,omitempty"`
-	RouteID   *uuid.UUID `json:"route_id,omitempty"`
+	ClassID uuid.UUID  `json:"class_id" validate:"required"`
+	BedID   *uuid.UUID `json:"bed_id,omitempty"`
+	RouteID *uuid.UUID `json:"route_id,omitempty"`
 }
 
 // StudentFilter defines query parameters for listing students.
@@ -150,4 +151,3 @@ type ChildSummary struct {
 	ClassName       string     `json:"class_name"`
 	Status          string     `json:"status"`
 }
-

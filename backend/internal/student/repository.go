@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"institution-os/pkg/db"
 	"github.com/jackc/pgx/v5"
+	"institution-os/pkg/db"
 )
 
 var ErrStudentNotFound = errors.New("student not found")
@@ -43,16 +43,23 @@ func (r *Repository) CreateAdmission(ctx context.Context, a *Admission, parentJS
 	query := `
 		INSERT INTO admissions (
 			id, institution_id, application_number, academic_year, intended_class,
-			first_name, last_name, date_of_birth, gender, status, parents_json,
+			first_name, last_name, date_of_birth, gender, nationality, status, parents_json,
 			created_by, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5,
-			$6, $7, $8, $9, $10, $11,
-			$12, NOW(), NOW()
+			$6, $7, $8, $9, COALESCE(NULLIF($10, ''), 'Kenyan'), $11, $12,
+			$13, NOW(), NOW()
 		)`
+	// COALESCE(NULLIF(...)) maps a blank Go string to 'Kenyan' inside
+	// SQL. An explicit '' would override the column default and store an
+	// empty nationality, and an explicit NULL would violate the NOT NULL
+	// constraint outright (defaults only apply when the column is
+	// omitted). Doing it in SQL keeps every insert path consistent even
+	// against databases whose column default has drifted from the
+	// migration files.
 	_, err := r.db.Exec(ctx, query,
 		a.ID, a.InstitutionID, a.ApplicationNumber, a.AcademicYear, a.IntendedClass,
-		a.FirstName, a.LastName, a.DateOfBirth, a.Gender, a.Status, parentJSON,
+		a.FirstName, a.LastName, a.DateOfBirth, a.Gender, a.Nationality, a.Status, parentJSON,
 		nil, // created_by — TODO: pass from context
 	)
 	return err
@@ -62,7 +69,7 @@ func (r *Repository) CreateAdmission(ctx context.Context, a *Admission, parentJS
 func (r *Repository) GetAdmissionByID(ctx context.Context, institutionID, admissionID uuid.UUID) (*Admission, error) {
 	query := `
 		SELECT id, institution_id, application_number, academic_year, intended_class,
-		       first_name, last_name, date_of_birth, gender, status,
+		       first_name, last_name, date_of_birth, gender, nationality, status,
 		       reviewed_by, reviewed_at, review_notes, student_id, created_at
 		FROM admissions
 		WHERE institution_id = $1 AND id = $2 AND deleted_at IS NULL`
@@ -70,7 +77,7 @@ func (r *Repository) GetAdmissionByID(ctx context.Context, institutionID, admiss
 	var a Admission
 	err := r.db.QueryRow(ctx, query, institutionID, admissionID).Scan(
 		&a.ID, &a.InstitutionID, &a.ApplicationNumber, &a.AcademicYear, &a.IntendedClass,
-		&a.FirstName, &a.LastName, &a.DateOfBirth, &a.Gender, &a.Status,
+		&a.FirstName, &a.LastName, &a.DateOfBirth, &a.Gender, &a.Nationality, &a.Status,
 		&a.ReviewedBy, &a.ReviewedAt, &a.ReviewNotes, &a.StudentID, &a.CreatedAt,
 	)
 	if err != nil {
@@ -97,7 +104,7 @@ func (r *Repository) ListAdmissions(ctx context.Context, institutionID uuid.UUID
 
 	query := `
 		SELECT id, institution_id, application_number, academic_year, intended_class,
-		       first_name, last_name, date_of_birth, gender, status,
+		       first_name, last_name, date_of_birth, gender, nationality, status,
 		       reviewed_by, reviewed_at, review_notes, student_id, created_at
 		FROM admissions
 		WHERE institution_id = $1 AND deleted_at IS NULL
@@ -116,7 +123,7 @@ func (r *Repository) ListAdmissions(ctx context.Context, institutionID uuid.UUID
 		var a Admission
 		if err := rows.Scan(
 			&a.ID, &a.InstitutionID, &a.ApplicationNumber, &a.AcademicYear, &a.IntendedClass,
-			&a.FirstName, &a.LastName, &a.DateOfBirth, &a.Gender, &a.Status,
+			&a.FirstName, &a.LastName, &a.DateOfBirth, &a.Gender, &a.Nationality, &a.Status,
 			&a.ReviewedBy, &a.ReviewedAt, &a.ReviewNotes, &a.StudentID, &a.CreatedAt,
 		); err != nil {
 			return nil, 0, err

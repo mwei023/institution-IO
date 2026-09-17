@@ -105,6 +105,7 @@ func TestCreateAdmission_Success(t *testing.T) {
 		LastName:            "Odhiambo",
 		DateOfBirth:         "2009-03-15",
 		Gender:              "F",
+		Nationality:         "Ugandan",
 		ParentName:          "John Odhiambo",
 		ParentRelationship:  "father",
 		ParentPhone:         "+254711200001",
@@ -117,6 +118,106 @@ func TestCreateAdmission_Success(t *testing.T) {
 	assert.Equal(t, "APP/2024/0042", admission.ApplicationNumber)
 	assert.Equal(t, "Amara", admission.FirstName)
 	assert.Equal(t, "submitted", admission.Status)
+	// The request's nationality must be persisted on the admission —
+	// it used to be silently dropped and enrollment hardcoded "Kenyan".
+	assert.Equal(t, "Ugandan", admission.Nationality)
+	repo.AssertExpectations(t)
+}
+
+func TestCreateAdmission_NationalityDefaultsToKenyan(t *testing.T) {
+	institutionID := uuid.New()
+	repo := new(MockStudentRepo)
+	svc := student.NewService(repo, &events.NoopPublisher{})
+
+	repo.On("GetNextApplicationNumber", mock.Anything, institutionID, mock.AnythingOfType("string")).
+		Return("APP/2024/0043", nil)
+	repo.On("CreateAdmission", mock.Anything, mock.AnythingOfType("*student.Admission"), mock.Anything).
+		Return(nil)
+
+	admission, err := svc.CreateAdmission(context.Background(), institutionID, &student.CreateAdmissionRequest{
+		AcademicYear:       "2024",
+		IntendedClass:      "Form 1",
+		FirstName:          "Amara",
+		LastName:           "Odhiambo",
+		DateOfBirth:        "2009-03-15",
+		Gender:             "F",
+		ParentName:         "John Odhiambo",
+		ParentRelationship: "father",
+		ParentPhone:        "+254711200001",
+		// Nationality omitted
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "Kenyan", admission.Nationality, "empty request nationality falls back to the DB column default")
+}
+
+func TestEnrollStudent_CarriesNationalityFromAdmission(t *testing.T) {
+	institutionID := uuid.New()
+	admissionID := uuid.New()
+	repo := new(MockStudentRepo)
+	svc := student.NewService(repo, &events.NoopPublisher{})
+
+	// Approved admission with a non-default nationality, not yet enrolled.
+	repo.On("GetAdmissionByID", mock.Anything, institutionID, admissionID).
+		Return(&student.Admission{
+			ID: admissionID, InstitutionID: institutionID,
+			FirstName: "Amara", LastName: "Odhiambo",
+			DateOfBirth: time.Date(2009, 3, 15, 0, 0, 0, 0, time.UTC),
+			Gender:      "F", Nationality: "Tanzanian",
+			Status: "approved",
+		}, nil)
+	repo.On("GetNextAdmissionNumber", mock.Anything, institutionID, mock.AnythingOfType("string"), "S").
+		Return("S/2026/0001", nil)
+	repo.On("CreateStudent", mock.Anything, mock.Anything).Return(nil).
+		Run(func(args mock.Arguments) {
+			s := args.Get(1).(*student.Student)
+			// The whole point: the student record inherits the admission's
+			// nationality instead of a hardcoded "Kenyan".
+			assert.Equal(t, "Tanzanian", s.Nationality)
+		})
+	repo.On("AddTimelineEvent", mock.Anything, institutionID, mock.Anything, "enrolled", mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	studentRec, err := svc.EnrollStudent(context.Background(), institutionID, admissionID, &student.EnrollStudentRequest{
+		ClassID: uuid.New(),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "Tanzanian", studentRec.Nationality)
+	repo.AssertExpectations(t)
+}
+
+func TestEnrollStudent_LegacyBlankNationality_FallsBackToKenyan(t *testing.T) {
+	// Admissions created before nationality was persisted carry an empty
+	// string in memory (the DB column backfills 'Kenyan'); enrollment must
+	// not write a blank nationality onto the student.
+	institutionID := uuid.New()
+	admissionID := uuid.New()
+	repo := new(MockStudentRepo)
+	svc := student.NewService(repo, &events.NoopPublisher{})
+
+	repo.On("GetAdmissionByID", mock.Anything, institutionID, admissionID).
+		Return(&student.Admission{
+			ID: admissionID, InstitutionID: institutionID,
+			FirstName: "Legacy", LastName: "Row",
+			DateOfBirth: time.Date(2009, 3, 15, 0, 0, 0, 0, time.UTC),
+			Gender:      "M", Nationality: "",
+			Status: "approved",
+		}, nil)
+	repo.On("GetNextAdmissionNumber", mock.Anything, institutionID, mock.AnythingOfType("string"), "S").
+		Return("S/2026/0002", nil)
+	repo.On("CreateStudent", mock.Anything, mock.Anything).Return(nil).
+		Run(func(args mock.Arguments) {
+			s := args.Get(1).(*student.Student)
+			assert.Equal(t, "Kenyan", s.Nationality, "blank legacy nationality falls back, never blank")
+		})
+	repo.On("AddTimelineEvent", mock.Anything, institutionID, mock.Anything, "enrolled", mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	_, err := svc.EnrollStudent(context.Background(), institutionID, admissionID, &student.EnrollStudentRequest{
+		ClassID: uuid.New(),
+	})
+	require.NoError(t, err)
 	repo.AssertExpectations(t)
 }
 
