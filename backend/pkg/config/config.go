@@ -48,6 +48,7 @@ type Config struct {
 	MpesaShortcode      string
 	MpesaPasskey        string
 	MpesaCallbackURL    string
+	MpesaCallbackSecret string // shared secret Daraja callback must send (X-Callback-Secret)
 	MpesaEnvironment    string // sandbox | production
 
 	// SMS (Africa's Talking)
@@ -79,20 +80,31 @@ func Load(envFile string) (*Config, error) {
 		_ = godotenv.Load(envFile)
 	}
 
+	// Pilot P0-4: missing required vars return an error instead of panic,
+	// so main can log + exit(1) cleanly without a stacktrace.
+	var missing []string
+	req := func(key string) string {
+		val := os.Getenv(key)
+		if val == "" {
+			missing = append(missing, key)
+		}
+		return val
+	}
+
 	cfg := &Config{
 		Port:              getEnv("PORT", "8080"),
 		Environment:       getEnv("ENVIRONMENT", "development"),
-		DatabaseURL:       requireEnv("DATABASE_URL"),
+		DatabaseURL:       req("DATABASE_URL"),
 		DBMaxConns:        int32(getEnvInt("DB_MAX_CONNS", 25)),
 		DBMinConns:        int32(getEnvInt("DB_MIN_CONNS", 5)),
 		DBMaxConnLife:     getEnvDuration("DB_MAX_CONN_LIFE", time.Hour),
 		DBMaxConnIdle:     getEnvDuration("DB_MAX_CONN_IDLE", 30*time.Minute),
 		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		JWTPrivateKeyPath: requireEnv("JWT_PRIVATE_KEY_PATH"),
-		JWTPublicKeyPath:  requireEnv("JWT_PUBLIC_KEY_PATH"),
+		JWTPrivateKeyPath: req("JWT_PRIVATE_KEY_PATH"),
+		JWTPublicKeyPath:  req("JWT_PUBLIC_KEY_PATH"),
 		JWTAccessTTL:      getEnvDuration("JWT_ACCESS_TTL", 15*time.Minute),
 		JWTRefreshTTL:     getEnvDuration("JWT_REFRESH_TTL", 7*24*time.Hour),
-		EncryptionKey:     requireEnv("ENCRYPTION_KEY"),
+		EncryptionKey:     req("ENCRYPTION_KEY"),
 		StorageEndpoint:   getEnv("STORAGE_ENDPOINT", "localhost:9000"),
 		StorageAccessKey:  getEnv("STORAGE_ACCESS_KEY", "minioadmin"),
 		StorageSecretKey:  getEnv("STORAGE_SECRET_KEY", "minioadmin"),
@@ -103,6 +115,7 @@ func Load(envFile string) (*Config, error) {
 		MpesaShortcode:      getEnv("MPESA_SHORTCODE", "174379"),
 		MpesaPasskey:        getEnv("MPESA_PASSKEY", ""),
 		MpesaCallbackURL:    getEnv("MPESA_CALLBACK_URL", ""),
+		MpesaCallbackSecret: getEnv("MPESA_CALLBACK_SECRET", ""),
 		MpesaEnvironment:    getEnv("MPESA_ENVIRONMENT", "sandbox"),
 		SMSAPIKey:           getEnv("SMS_API_KEY", ""),
 		SMSUsername:         getEnv("SMS_USERNAME", "sandbox"),
@@ -114,6 +127,9 @@ func Load(envFile string) (*Config, error) {
 		AllowedOrigins:      []string{getEnv("ALLOWED_ORIGINS", "http://localhost:3000")},
 	}
 
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing required environment variables: %v", missing)
+	}
 	return cfg, nil
 }
 
@@ -123,14 +139,6 @@ func (c *Config) IsProduction() bool {
 
 func (c *Config) IsDevelopment() bool {
 	return c.Environment == "development"
-}
-
-func requireEnv(key string) string {
-	val := os.Getenv(key)
-	if val == "" {
-		panic(fmt.Sprintf("required environment variable %s is not set", key))
-	}
-	return val
 }
 
 func getEnv(key, fallback string) string {

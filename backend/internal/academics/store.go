@@ -61,10 +61,28 @@ type Store interface {
 	// Terms
 	ListTerms(ctx context.Context, institutionID uuid.UUID) ([]*Term, error)
 
+	// Parent portal ownership (pilot P0-4)
+	IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error)
+	GetStudentCurrentClass(ctx context.Context, institutionID, studentID uuid.UUID) (uuid.UUID, error)
+
 	// Dashboard (defined in dashboard.go, not repository.go)
 	GetInstitutionAttendanceToday(ctx context.Context, institutionID uuid.UUID, date time.Time) (*InstitutionAttendanceToday, error)
 
 	// academics/store.go — add to Store interface
 	ListTeachingAssignmentsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TeachingAssignmentOption, error)
 	CreateTimetablePeriod(ctx context.Context, institutionID uuid.UUID, req *CreateTimetablePeriodRequest) (*TimetablePeriod, error)
+
+	// Timetable engine: schedule profiles, slots, requirements
+	ListScheduleProfiles(ctx context.Context, institutionID uuid.UUID) ([]*ScheduleProfile, error)
+	CreateScheduleProfile(ctx context.Context, institutionID uuid.UUID, req *CreateScheduleProfileRequest) (*ScheduleProfile, error)
+	ListScheduleSlots(ctx context.Context, institutionID, profileID uuid.UUID) ([]*ScheduleSlot, error)
+	CreateScheduleSlot(ctx context.Context, institutionID, profileID uuid.UUID, req *CreateScheduleSlotRequest) (*ScheduleSlot, error)
+	UpdateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *UpdateScheduleSlotRequest) (*ScheduleSlot, error)
+	DeleteScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID) error
+	CreateScheduleSlotsBulk(ctx context.Context, institutionID, profileID uuid.UUID, req *BulkCreateScheduleSlotsRequest) (*BulkCreateScheduleSlotsResult, error)
+	CopyScheduleDay(ctx context.Context, institutionID, profileID uuid.UUID, req *CopyScheduleDayRequest) (*BulkCreateScheduleSlotsResult, error)
+	PropagateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *PropagateScheduleSlotRequest) (*PropagateScheduleSlotResult, error)
+	ListLessonRequirements(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*LessonRequirement, error)
+	UpsertLessonRequirement(ctx context.Context, institutionID, classID uuid.UUID, req *UpsertLessonRequirementRequest) (*LessonRequirement, error)
+	DeleteLessonRequirement(ctx context.Context, institutionID, requirementID uuid.UUID) error
 }

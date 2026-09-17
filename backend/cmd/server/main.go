@@ -20,6 +20,7 @@ import (
 	"institution-os/internal/cbc"
 	"institution-os/internal/communication"
 	digitalocker "institution-os/internal/digital_locker"
+	"institution-os/internal/exams"
 	"institution-os/internal/finance"
 	finmpesa "institution-os/internal/finance/mpesa"
 	"institution-os/internal/institution"
@@ -91,6 +92,9 @@ func main() {
 	commRepo := communication.NewRepository(dbPool)
 	commSvc := communication.NewService(commRepo, publisher)
 
+	examsRepo := exams.NewRepository(dbPool)
+	examsSvc := exams.NewService(examsRepo)
+
 	lockerSvc, err := digitalocker.NewService(dbPool, digitalocker.StorageConfig{
 		Endpoint:  cfg.StorageEndpoint,
 		AccessKey: cfg.StorageAccessKey,
@@ -106,11 +110,12 @@ func main() {
 	// ── Handlers ──────────────────────────────────────────────────
 	authHandler      := auth.NewHandler(authSvc)
 	studentHandler   := student.NewHandler(studentSvc)
-	financeHandler   := finance.NewHandler(financeSvc)
+	financeHandler   := finance.NewHandlerWithCallbackSecret(financeSvc, cfg.MpesaCallbackSecret)
 	academicsHandler := academics.NewHandler(academicsSvc)
 	cbcHandler       := cbc.NewHandler(cbcSvc)
 
 	institutionHandler := institution.NewHandler(institutionSvc)
+	examsHandler := exams.NewHandler(examsSvc)
 	
 	commHandler      := communication.NewHandler(commSvc)
 	var lockerHandler *digitalocker.Handler
@@ -139,15 +144,17 @@ func main() {
 	r.Get("/health", healthHandler(dbPool))
 	r.Get("/health/ready", readinessHandler(dbPool))
 
-	// M-Pesa callback (no auth — Safaricom server)
-	r.Post("/api/v1/finance/mpesa/callback", financeHandler.MpesaCallback)
+	// M-Pesa callback (no JWT — Safaricom server; shared-secret + rate limit instead)
+	authLimiter := auth.NewRateLimiter(20, time.Minute)     // login/MFA/refresh brute-force gate
+	callbackLimiter := auth.NewRateLimiter(100, time.Minute) // Daraja retry bursts
+	r.With(callbackLimiter.Middleware).Post("/api/v1/finance/mpesa/callback", financeHandler.MpesaCallback)
 	//r.Post("/api/v1/finance/mpesa/callback/{institution_slug}", financeHandler.MpesaCallback)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public auth
-		r.Post("/auth/login", authHandler.Login)
-		r.Post("/auth/mfa/verify", authHandler.VerifyMFA)
-		r.Post("/auth/refresh", authHandler.RefreshToken)
+		// Public auth — rate-limited (pilot P0-4 brute-force gate)
+		r.With(authLimiter.Middleware).Post("/auth/login", authHandler.Login)
+		r.With(authLimiter.Middleware).Post("/auth/mfa/verify", authHandler.VerifyMFA)
+		r.With(authLimiter.Middleware).Post("/auth/refresh", authHandler.RefreshToken)
 		r.Post("/auth/logout", authHandler.Logout)
 
 		// Protected
@@ -219,6 +226,22 @@ func main() {
 				r.With(auth.RequirePermission("classes:write")).Post("/teaching-assignments", academicsHandler.CreateTeachingAssignment)
 				r.With(auth.RequirePermission("classes:write")).Get("/classes/{id}/teaching-assignments", academicsHandler.ListTeachingAssignmentsForClass)
 				r.With(auth.RequirePermission("classes:write")).Post("/timetable-periods", academicsHandler.CreateTimetablePeriod)
+				// Timetable engine: bell-schedule configuration (profiles +
+				// slots), lesson requirements, and the admin teacher view.
+				// All under classes:write — no new permission seeding needed.
+				r.With(auth.RequirePermission("classes:write")).Get("/schedule-profiles", academicsHandler.ListScheduleProfiles)
+				r.With(auth.RequirePermission("classes:write")).Post("/schedule-profiles", academicsHandler.CreateScheduleProfile)
+				r.With(auth.RequirePermission("classes:write")).Get("/schedule-profiles/{id}/slots", academicsHandler.ListScheduleSlots)
+				r.With(auth.RequirePermission("classes:write")).Post("/schedule-profiles/{id}/slots", academicsHandler.CreateScheduleSlot)
+				r.With(auth.RequirePermission("classes:write")).Post("/schedule-profiles/{id}/slots/bulk", academicsHandler.CreateScheduleSlotsBulk)
+				r.With(auth.RequirePermission("classes:write")).Post("/schedule-profiles/{id}/slots/copy", academicsHandler.CopyScheduleDay)
+				r.With(auth.RequirePermission("classes:write")).Patch("/schedule-slots/{id}", academicsHandler.UpdateScheduleSlot)
+				r.With(auth.RequirePermission("classes:write")).Post("/schedule-slots/{id}/propagate", academicsHandler.PropagateScheduleSlot)
+				r.With(auth.RequirePermission("classes:write")).Delete("/schedule-slots/{id}", academicsHandler.DeleteScheduleSlot)
+				r.With(auth.RequirePermission("classes:write")).Get("/classes/{id}/lesson-requirements", academicsHandler.ListLessonRequirements)
+				r.With(auth.RequirePermission("classes:write")).Put("/classes/{id}/lesson-requirements", academicsHandler.UpsertLessonRequirement)
+				r.With(auth.RequirePermission("classes:write")).Delete("/lesson-requirements/{id}", academicsHandler.DeleteLessonRequirement)
+				r.With(auth.RequirePermission("classes:write")).Get("/teachers/{id}/timetable", academicsHandler.GetTeacherTimetable)
 			})
 
 			// CBC v1.0 academic layer — separate route group, separate
@@ -242,26 +265,60 @@ func main() {
 				// editable directly in the DB until this exists.
 			})
 
+			// Examination timetable — canonical schedule per session.
+			// Writes reuse classes:write; read views reuse attendance:read,
+			// so no new permission seeding is required.
+			r.Route("/exams", func(r chi.Router) {
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions", examsHandler.ListSessions)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions", examsHandler.CreateSession)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}", examsHandler.GetSession)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions/{id}/papers", examsHandler.CreatePaper)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/papers", examsHandler.ListPapers)
+				r.With(auth.RequirePermission("classes:write")).Post("/papers/{paperId}/groups", examsHandler.AddPaperGroup)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions/{id}/sittings", examsHandler.CreateSitting)
+				r.With(auth.RequirePermission("classes:write")).Patch("/sittings/{sittingId}", examsHandler.UpdateSitting)
+				r.With(auth.RequirePermission("classes:write")).Delete("/sittings/{sittingId}", examsHandler.DeleteSitting)
+				r.With(auth.RequirePermission("classes:write")).Post("/sittings/{sittingId}/invigilators", examsHandler.AssignInvigilator)
+				r.With(auth.RequirePermission("classes:write")).Delete("/sittings/{sittingId}/invigilators", examsHandler.RemoveInvigilator)
+				r.With(auth.RequirePermission("classes:write")).Post("/sittings/{sittingId}/arrangements", examsHandler.AddArrangement)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions/{id}/validate", examsHandler.Validate)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions/{id}/publish", examsHandler.Publish)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions/{id}/reopen", examsHandler.ReopenSession)
+				r.With(auth.RequirePermission("classes:write")).Post("/sessions/{id}/generate", examsHandler.GenerateDraft)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/timetable", examsHandler.MasterView)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/timetable/published", examsHandler.PublishedMasterView)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/timetable/candidate", examsHandler.CandidateView)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/timetable/paper", examsHandler.PaperTimetableView)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/timetable/room", examsHandler.RoomView)
+				r.With(auth.RequirePermission("attendance:read")).Get("/sessions/{id}/timetable/invigilator", examsHandler.InvigilatorView)
+			})
+
 			// Communications
+			// NOTE (pilot P0-4): threads/messages are row-scoped to
+			// sender/recipient = caller + institution_id in the repo, so
+			// any authenticated user may message within their own
+			// institution by design. No messages:* permission exists in
+			// the seed data — do not gate these on a permission string
+			// until one is seeded and granted, or messaging 403s for all.
 			r.Route("/communications", func(r chi.Router) {
 				r.With(auth.RequirePermission("announcements:read")).Get("/announcements", commHandler.ListAnnouncements)
 				r.With(auth.RequirePermission("announcements:write")).Post("/announcements", commHandler.CreateAnnouncement)
-				r.Post("/announcements/{id}/read", commHandler.MarkAnnouncementRead)
+				r.With(auth.RequirePermission("announcements:read")).Post("/announcements/{id}/read", commHandler.MarkAnnouncementRead)
 				r.Get("/messages", commHandler.GetThreads)
 				r.Get("/messages/{user_id}", commHandler.GetMessages)
 				r.Post("/messages", commHandler.SendMessage)
 			})
 
-			// Parent portal — role-gated, not permission-gated
-			r.Route("/parent", func(r chi.Router) {
-				r.Use(auth.RequireRole("parent"))
-				r.Get("/children", studentHandler.GetMyChildren)
-				r.Get("/children/{id}/report-card", academicsHandler.GetChildReportCard)
-				r.Get("/children/{id}/cbc-report-card", cbcHandler.GetChildReportCard)
-				r.Get("/children/{id}/subject-scores", academicsHandler.GetChildSubjectScores)
-				r.Get("/children/{id}/account", financeHandler.GetFeeAccount)
-				r.Get("/children/{id}/attendance", academicsHandler.GetAttendanceSummary) // uses class_id query param
-			})
+		// Parent portal — role-gated, not permission-gated
+		r.Route("/parent", func(r chi.Router) {
+			r.Use(auth.RequireRole("parent"))
+			r.Get("/children", studentHandler.GetMyChildren)
+			r.Get("/children/{id}/report-card", academicsHandler.GetChildReportCard)
+			r.Get("/children/{id}/cbc-report-card", cbcHandler.GetChildReportCard)
+			r.Get("/children/{id}/subject-scores", academicsHandler.GetChildSubjectScores)
+			r.Get("/children/{id}/account", financeHandler.GetFeeAccount)
+			r.Get("/children/{id}/attendance", academicsHandler.GetChildAttendanceSummary)
+		})
 
 			// Digital Locker
 			r.Route("/locker", func(r chi.Router) {

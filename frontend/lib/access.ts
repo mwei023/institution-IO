@@ -2,7 +2,7 @@ import React from "react";
 import {
   LayoutDashboard, Users, GraduationCap, BookOpen, DollarSign,
   MessageSquare, Settings, FileText, Bell, Shield, Home, Stethoscope, Bus,
-  Library, Package, Building2, UserCheck, Receipt,
+  Library, Package, Building2, UserCheck, Receipt, Calendar, Clock,
 } from "lucide-react";
 import type { UserProfile } from "./store";
 
@@ -21,6 +21,9 @@ export const allNavItems: NavItem[] = [
   { label: "Admissions",     href: "/admissions",      icon: UserCheck,      permission: "students:write" },
   { label: "Academics",      href: "/academics",       icon: BookOpen,       permission: "attendance:read" },
   { label: "Classes",        href: "/academics/classes", icon: BookOpen,       permission: "classes:write" },
+  { label: "Timetable",      href: "/academics/timetable", icon: Calendar,     permission: "classes:write" },
+  { label: "Bell Schedule",  href: "/academics/schedule", icon: Clock,        permission: "classes:write" },
+  { label: "Exam Timetable", href: "/academics/exams", icon: Calendar,     permission: "attendance:read" },
   { label: "Report Cards",   href: "/academics/report-cards", icon: FileText, permission: "grades:write", curriculum: "844" },
   { label: "Report Cards",   href: "/academics/cbc-report-cards", icon: FileText, permission: "grades:write", curriculum: "cbc" },
   { label: "Finance",        href: "/finance",         icon: DollarSign,     permission: "fees:read" },

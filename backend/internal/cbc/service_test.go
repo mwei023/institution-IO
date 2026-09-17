@@ -3,11 +3,14 @@ package cbc
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"institution-os/internal/academics"
 )
 
 // MockStore is a fake Store — it doesn't touch a real database. Every
@@ -40,6 +43,48 @@ func (m *MockStore) TeacherHasLearningAreaAssignment(ctx context.Context, instit
 func (m *MockStore) SaveEntries(ctx context.Context, institutionID, componentID, enteredBy uuid.UUID, entries []EntryInput) error {
 	args := m.Called(ctx, institutionID, componentID, enteredBy, entries)
 	return args.Error(0)
+}
+
+// MockAcademicsRepo stubs the service's cross-package dependency
+// (the subset of *academics.Repository declared as Service.AcademicsRepo).
+// Before this existed, tests built Service{repo: store} with a nil
+// academicsRepo and panicked the moment SaveEntries touched it.
+type MockAcademicsRepo struct {
+	mock.Mock
+}
+
+func (m *MockAcademicsRepo) IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error) {
+	args := m.Called(ctx, institutionID, parentUserID, studentID)
+	return args.Bool(0), args.Error(1)
+}
+func (m *MockAcademicsRepo) TeacherHasAssignmentInClass(ctx context.Context, institutionID, teacherID, classID uuid.UUID) (bool, error) {
+	args := m.Called(ctx, institutionID, teacherID, classID)
+	return args.Bool(0), args.Error(1)
+}
+func (m *MockAcademicsRepo) GetClassByID(ctx context.Context, institutionID, classID uuid.UUID) (*academics.Class, error) {
+	args := m.Called(ctx, institutionID, classID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*academics.Class), args.Error(1)
+}
+func (m *MockAcademicsRepo) GetActiveStudentIDsForClass(ctx context.Context, institutionID, classID uuid.UUID) ([]uuid.UUID, error) {
+	args := m.Called(ctx, institutionID, classID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]uuid.UUID), args.Error(1)
+}
+func (m *MockAcademicsRepo) GetTermDates(ctx context.Context, institutionID, termID uuid.UUID) (time.Time, time.Time, error) {
+	args := m.Called(ctx, institutionID, termID)
+	return args.Get(0).(time.Time), args.Get(1).(time.Time), args.Error(2)
+}
+func (m *MockAcademicsRepo) GetAttendanceSummary(ctx context.Context, institutionID, classID uuid.UUID, startDate, endDate time.Time) ([]*academics.AttendanceSummary, error) {
+	args := m.Called(ctx, institutionID, classID, startDate, endDate)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*academics.AttendanceSummary), args.Error(1)
 }
 
 func (m *MockStore) GetEntries(ctx context.Context, institutionID, componentID uuid.UUID) ([]*Entry, error) {
@@ -125,6 +170,7 @@ func TestSaveEntries_NotAssignedToLearningArea(t *testing.T) {
 	unassignedClassID := uuid.New()
 
 	store := new(MockStore)
+	acad := new(MockAcademicsRepo)
 
 	// Step 1 of what SaveEntries does internally: look up which class
 	// this component belongs to.
@@ -135,7 +181,7 @@ func TestSaveEntries_NotAssignedToLearningArea(t *testing.T) {
 	// We're telling the mock: "when asked, say NO" — this is the
 	// entire point of the test, simulating the exact real-world state
 	// we seeded tonight (David assigned to Grade 7 A, not Grade 8 A).
-	store.On("TeacherHasLearningAreaAssignment", mock.Anything, institutionID, teacherID, unassignedClassID).
+	acad.On("TeacherHasAssignmentInClass", mock.Anything, institutionID, teacherID, unassignedClassID).
 		Return(false, nil)
 
 	// Deliberately NOT setting up an expectation for SaveEntries here.
@@ -144,7 +190,7 @@ func TestSaveEntries_NotAssignedToLearningArea(t *testing.T) {
 	// exactly what we want: proof the real database write never
 	// happens when authorization fails.
 
-	svc := &Service{repo: store}
+	svc := &Service{repo: store, academicsRepo: acad}
 
 	req := &BulkEntryRequest{
 		ComponentID: componentID,
@@ -176,10 +222,11 @@ func TestSaveEntries_Assigned_Succeeds(t *testing.T) {
 	assignedClassID := uuid.New()
 
 	store := new(MockStore)
+	acad := new(MockAcademicsRepo)
 
 	store.On("GetComponentClassID", mock.Anything, institutionID, componentID).
 		Return(assignedClassID, nil)
-	store.On("TeacherHasLearningAreaAssignment", mock.Anything, institutionID, teacherID, assignedClassID).
+	acad.On("TeacherHasAssignmentInClass", mock.Anything, institutionID, teacherID, assignedClassID).
 		Return(true, nil) // this time: yes, assigned
 
 	// This time we DO expect SaveEntries to actually be called — it's
@@ -189,7 +236,7 @@ func TestSaveEntries_Assigned_Succeeds(t *testing.T) {
 	store.On("SaveEntries", mock.Anything, institutionID, componentID, teacherID, mock.Anything).
 		Return(nil)
 
-	svc := &Service{repo: store}
+	svc := &Service{repo: store, academicsRepo: acad}
 
 	req := &BulkEntryRequest{
 		ComponentID: componentID,

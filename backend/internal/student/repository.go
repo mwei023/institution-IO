@@ -25,6 +25,19 @@ func NewRepository(db *db.Pool) *Repository {
 	return &Repository{db: db}
 }
 
+// IsChildOfParent reports whether studentID is linked to parentUserID
+// via student_parent_links + parent_guardians(user_id). Pilot P0-4.
+func (r *Repository) IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM student_parent_links spl
+			JOIN parent_guardians pg ON pg.id = spl.parent_id
+			WHERE spl.institution_id = $1 AND pg.user_id = $2 AND spl.student_id = $3
+		)`, institutionID, parentUserID, studentID).Scan(&exists)
+	return exists, err
+}
+
 // CreateAdmission inserts a new admission application.
 func (r *Repository) CreateAdmission(ctx context.Context, a *Admission, parentJSON []byte) error {
 	query := `

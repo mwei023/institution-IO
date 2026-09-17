@@ -227,10 +227,22 @@ func (h *Handler) UnpublishReportCard(w http.ResponseWriter, r *http.Request) {
 // GetChildReportCard handles GET /api/v1/parent/children/{id}/cbc-report-card
 func (h *Handler) GetChildReportCard(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
 	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
 		return
+	}
+	if claims != nil && claims.Role == "parent" {
+		parentID, perr := uuid.Parse(claims.UserID)
+		if perr != nil {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid user")
+			return
+		}
+		if verr := h.svc.VerifyParentChild(r.Context(), institutionID, parentID, studentID); verr != nil {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Not linked to student")
+			return
+		}
 	}
 	rc, err := h.svc.GetChildReportCard(r.Context(), institutionID, studentID)
 	if err != nil {

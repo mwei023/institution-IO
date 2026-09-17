@@ -3,7 +3,9 @@ package mpesa
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,9 +94,14 @@ func (c *Client) InitiateSTKPush(ctx context.Context, creds ChannelCredentials, 
 			Str("shortcode", creds.Shortcode).
 			Int64("amount", amount).
 			Msg("MPESA_STUB: would send STK push")
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, fmt.Errorf("stub id: %w", err)
+		}
+		// crypto-rand stub IDs (pilot P0-3) — never predictable unixnano.
 		return &STKPushResponse{
-			MerchantRequestID: "stub-merchant-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-			CheckoutRequestID: "stub-checkout-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+			MerchantRequestID: "stub-merchant-" + hex.EncodeToString(b[:]),
+			CheckoutRequestID: "stub-checkout-" + hex.EncodeToString(b[:]),
 			ResponseCode:      "0",
 			CustomerMessage:   "Success. Request accepted for processing",
 		}, nil
@@ -104,6 +111,10 @@ func (c *Client) InitiateSTKPush(ctx context.Context, creds ChannelCredentials, 
 	if err != nil {
 		return nil, err
 	}
+	// Pilot P0-3 warning: channel passkey/secret are currently plaintext
+	// columns (see README Known gaps). Do not enter production Daraja
+	// credentials until they are AES-256-GCM encrypted at rest.
+	log.Warn().Msg("mpesa live credentials used — ensure columns encrypted before pilot with real money")
 
 	timestamp := time.Now().Format("20060102150405")
 	password := base64.StdEncoding.EncodeToString(

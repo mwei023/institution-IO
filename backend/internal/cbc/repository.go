@@ -27,6 +27,20 @@ func NewRepository(db *db.Pool) *Repository {
 	return &Repository{db: db}
 }
 
+// IsChildOfParent reports whether studentID is linked to parentUserID.
+// Same SQL as student.Repository — duplicated so parent handlers in this
+// domain can enforce ownership without cross-package repo coupling. P0-4.
+func (r *Repository) IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM student_parent_links spl
+			JOIN parent_guardians pg ON pg.id = spl.parent_id
+			WHERE spl.institution_id = $1 AND pg.user_id = $2 AND spl.student_id = $3
+		)`, institutionID, parentUserID, studentID).Scan(&exists)
+	return exists, err
+}
+
 // GetInstitutionCurriculumType returns the institution's configured
 // curriculum ('844' or 'cbe') — the gate that decides which academic
 // engine's screens/endpoints an institution should be using at all.

@@ -2,9 +2,10 @@ package cbc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
-	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -22,12 +23,39 @@ import (
 // cards are NOT shared; attendance/class lookups ARE).
 type Service struct {
 	repo          Store
-	academicsRepo *academics.Repository
+	academicsRepo AcademicsRepo
 	publisher     events.Publisher
 }
 
-func NewService(repo *Repository, academicsRepo *academics.Repository, publisher events.Publisher) *Service {
+// AcademicsRepo is the subset of *academics.Repository this service
+// depends on, expressed as an interface (consumer-side). Production
+// wiring passes *academics.Repository directly; tests pass a stub —
+// constructing a Service without it used to nil-panic on the first
+// authorization check.
+type AcademicsRepo interface {
+	IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error)
+	TeacherHasAssignmentInClass(ctx context.Context, institutionID, teacherID, classID uuid.UUID) (bool, error)
+	GetClassByID(ctx context.Context, institutionID, classID uuid.UUID) (*academics.Class, error)
+	GetActiveStudentIDsForClass(ctx context.Context, institutionID, classID uuid.UUID) ([]uuid.UUID, error)
+	GetTermDates(ctx context.Context, institutionID, termID uuid.UUID) (time.Time, time.Time, error)
+	GetAttendanceSummary(ctx context.Context, institutionID, classID uuid.UUID, startDate, endDate time.Time) ([]*academics.AttendanceSummary, error)
+}
+
+func NewService(repo *Repository, academicsRepo AcademicsRepo, publisher events.Publisher) *Service {
 	return &Service{repo: repo, academicsRepo: academicsRepo, publisher: publisher}
+}
+
+// VerifyParentChild enforces parent→child ownership via the academics
+// repo (student links live there conceptually; same SQL). Pilot P0-4.
+func (s *Service) VerifyParentChild(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) error {
+	linked, err := s.academicsRepo.IsChildOfParent(ctx, institutionID, parentUserID, studentID)
+	if err != nil {
+		return err
+	}
+	if !linked {
+		return fmt.Errorf("not linked to student")
+	}
+	return nil
 }
 
 // ─── Learning Areas ─────────────────────────────────────────────────

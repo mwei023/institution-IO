@@ -16,23 +16,30 @@ const (
 	institutionKey contextKey = "institution_id"
 )
 
-// JWTMiddleware validates the Bearer token in the Authorization header.
+// JWTMiddleware validates the Bearer token in the Authorization header,
+// falling back to the httpOnly access_token cookie (pilot P0-4: lets the
+// frontend drop localStorage without a backend change).
 func JWTMiddleware(svc *Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
+			token := ""
+			if h := r.Header.Get("Authorization"); h != "" {
+				parts := strings.SplitN(h, " ", 2)
+				if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+					token = parts[1]
+				}
+			}
+			if token == "" {
+				if c, err := r.Cookie("access_token"); err == nil {
+					token = c.Value
+				}
+			}
+			if token == "" {
 				response.Unauthorized(w)
 				return
 			}
 
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-				response.Unauthorized(w)
-				return
-			}
-
-			claims, err := svc.ParseAccessToken(parts[1])
+			claims, err := svc.ParseAccessToken(token)
 			if err != nil {
 				response.Unauthorized(w)
 				return

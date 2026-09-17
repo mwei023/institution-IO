@@ -16,6 +16,8 @@ import (
 // Handler handles finance HTTP endpoints.
 type Handler struct {
 	svc *Service
+	// callbackSecret gates the Daraja callback (pilot P0-3). Empty = warn-only.
+	callbackSecret string
 }
 
 // NewHandler creates a new finance handler.
@@ -23,15 +25,33 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// NewHandlerWithCallbackSecret wires the shared-secret gate for the callback.
+func NewHandlerWithCallbackSecret(svc *Service, secret string) *Handler {
+	return &Handler{svc: svc, callbackSecret: secret}
+}
+
 // GetFeeAccount handles GET /api/v1/finance/students/{id}/account
+// Shared by staff and the parent portal (GET /parent/children/{id}/account).
+// Pilot P0-4: callers with role=parent must prove linkage, else 403.
 func (h *Handler) GetFeeAccount(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
 	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
 		return
 	}
-
+	if claims != nil && claims.Role == "parent" {
+		parentID, perr := uuid.Parse(claims.UserID)
+		if perr != nil {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid user")
+			return
+		}
+		if verr := h.svc.VerifyParentChild(r.Context(), institutionID, parentID, studentID); verr != nil {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Not linked to student")
+			return
+		}
+	}
 	acct, err := h.svc.GetStudentFeeAccount(r.Context(), institutionID, studentID)
 	if err != nil {
 		if errors.Is(err, ErrStudentNotFound) {
@@ -94,9 +114,23 @@ func (h *Handler) InitiateSTKPush(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// This is called by Safaricom Daraja — no auth required, validated via IP + payload.
+// Called by Safaricom Daraja — no JWT auth. Attribution comes from OUR
+// stk-request record keyed by CheckoutRequestID (never from the payload),
+// unknown checkout IDs are logged + accepted without effect (idempotent),
+// and a shared secret (X-Callback-Secret) gates spoofed callbacks when
+// MPESA_CALLBACK_SECRET is set. Pilot P0-3: set the secret in production;
+// empty secret logs a loud warning and accepts (sandbox onboarding only).
 // MpesaCallback handles POST /api/v1/finance/mpesa/callback
 func (h *Handler) MpesaCallback(w http.ResponseWriter, r *http.Request) {
+	if h.callbackSecret != "" {
+		if r.Header.Get("X-Callback-Secret") != h.callbackSecret {
+			log.Warn().Str("remote", r.RemoteAddr).Msg("mpesa callback rejected — bad secret")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	} else {
+		log.Warn().Msg("mpesa callback accepted without secret — set MPESA_CALLBACK_SECRET before pilot")
+	}
 	var rawPayload json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&rawPayload); err != nil {
 		log.Error().Err(err).Msg("mpesa callback decode")

@@ -33,6 +33,20 @@ func NewRepository(db *db.Pool) *Repository {
 	return &Repository{db: db}
 }
 
+// IsChildOfParent reports whether studentID is linked to parentUserID.
+// Same SQL as student.Repository — duplicated so the shared fee handler
+// can enforce parent ownership without cross-package coupling. P0-4.
+func (r *Repository) IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM student_parent_links spl
+			JOIN parent_guardians pg ON pg.id = spl.parent_id
+			WHERE spl.institution_id = $1 AND pg.user_id = $2 AND spl.student_id = $3
+		)`, institutionID, parentUserID, studentID).Scan(&exists)
+	return exists, err
+}
+
 
 // GetStudentFeeAccount retrieves the fee summary for a student.
 //
@@ -264,9 +278,21 @@ func (r *Repository) UpdateInvoicePaidAmount(ctx context.Context, institutionID,
 }
 
 // GetNextReceiptNumber generates the next sequential receipt number.
+// Pilot P0-3: serialized per institution with an advisory transaction lock
+// so two concurrent payments can't both read the same COUNT. The UNIQUE
+// (institution_id, receipt_number) constraint remains the backstop —
+// callers should retry once on unique violation.
 func (r *Repository) GetNextReceiptNumber(ctx context.Context, institutionID uuid.UUID) (string, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, institutionID.String()); err != nil {
+		return "", err
+	}
 	var count int
-	err := r.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM fee_payments WHERE institution_id = $1`,
 		institutionID,
 	).Scan(&count)
@@ -274,7 +300,11 @@ func (r *Repository) GetNextReceiptNumber(ctx context.Context, institutionID uui
 		return "", err
 	}
 	year := time.Now().Year()
-	return fmt.Sprintf("RCP/%d/%06d", year, count+1), nil
+	num := fmt.Sprintf("RCP/%d/%06d", year, count+1)
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return num, nil
 }
 
 // StoreMpesaTransaction saves a raw Daraja callback.
@@ -763,10 +793,18 @@ func (r *Repository) InvoiceExistsForStudentTerm(ctx context.Context, institutio
 }
  
 // GetNextInvoiceNumber generates a sequential invoice number, same
-// pattern as GetNextReceiptNumber.
+// serialized pattern as GetNextReceiptNumber.
 func (r *Repository) GetNextInvoiceNumber(ctx context.Context, institutionID uuid.UUID) (string, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, "inv_"+institutionID.String()); err != nil {
+		return "", err
+	}
 	var count int
-	err := r.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM fee_invoices WHERE institution_id = $1`,
 		institutionID,
 	).Scan(&count)
@@ -774,7 +812,29 @@ func (r *Repository) GetNextInvoiceNumber(ctx context.Context, institutionID uui
 		return "", err
 	}
 	year := time.Now().Year()
-	return fmt.Sprintf("INV/%d/%06d", year, count+1), nil
+	num := fmt.Sprintf("INV/%d/%06d", year, count+1)
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return num, nil
+}
+
+// GetInvoiceByID fetches one invoice scoped to its institution (pilot P0-3
+// ownership check for manual payments).
+func (r *Repository) GetInvoiceByID(ctx context.Context, institutionID, invoiceID uuid.UUID) (*FeeInvoice, error) {
+	var inv FeeInvoice
+	err := r.db.QueryRow(ctx, `
+		SELECT id, institution_id, student_id, term_id, invoice_number, total_amount, paid_amount, status
+		FROM fee_invoices WHERE id = $1 AND institution_id = $2`,
+		invoiceID, institutionID,
+	).Scan(&inv.ID, &inv.InstitutionID, &inv.StudentID, &inv.TermID, &inv.InvoiceNumber, &inv.TotalAmount, &inv.PaidAmount, &inv.Status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrInvoiceNotFound
+		}
+		return nil, err
+	}
+	return &inv, nil
 }
  
 // CreateInvoiceWithLines creates one invoice plus its line items, in a

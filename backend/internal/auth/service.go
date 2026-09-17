@@ -257,6 +257,9 @@ func (s *Service) generateMFAToken(userID uuid.UUID) (string, error) {
 
 func (s *Service) validateMFAToken(tokenStr string) (uuid.UUID, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &jwtClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
 		return s.publicKey, nil
 	})
 	if err != nil || !token.Valid {

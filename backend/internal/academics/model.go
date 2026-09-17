@@ -280,20 +280,162 @@ type TeachingAssignment struct {
 // teacher name so the frontend never has to make three separate calls
 // to build one <select>.
 type TeachingAssignmentOption struct {
-	ID           uuid.UUID `json:"id"`
-	OfferingName string    `json:"offering_name"`
-	OfferingType string    `json:"offering_type"` // "subject" | "learning_area"
-	TeacherID    uuid.UUID `json:"teacher_id"`
-	TeacherName  string    `json:"teacher_name"`
+	ID                 uuid.UUID `json:"id"`
+	AcademicOfferingID uuid.UUID `json:"academic_offering_id"`
+	OfferingName       string    `json:"offering_name"`
+	OfferingType       string    `json:"offering_type"` // "subject" | "learning_area"
+	TeacherID          uuid.UUID `json:"teacher_id"`
+	TeacherName        string    `json:"teacher_name"`
 }
 
 type CreateTimetablePeriodRequest struct {
 	ClassID              uuid.UUID `json:"class_id" validate:"required"`
 	TermID               uuid.UUID `json:"term_id" validate:"required"`
 	TeachingAssignmentID uuid.UUID `json:"teaching_assignment_id" validate:"required"`
-	DayOfWeek            int       `json:"day_of_week" validate:"required,min=1,max=5"`
+	DayOfWeek            int       `json:"day_of_week" validate:"required,min=1,max=7"`
 	PeriodNumber         int       `json:"period_number" validate:"required,min=1,max=10"`
 	StartTime            string    `json:"start_time" validate:"required"` // "HH:MM", 24h
 	EndTime              string    `json:"end_time" validate:"required"`
 	Room                 *string   `json:"room,omitempty"`
+}
+
+// ScheduleProfile is one bell-schedule configuration. term_id NULL means
+// the profile applies to every term unless a term-specific one exists.
+type ScheduleProfile struct {
+	ID            uuid.UUID  `json:"id"`
+	InstitutionID uuid.UUID  `json:"institution_id"`
+	TermID        *uuid.UUID `json:"term_id,omitempty"`
+	Name          string     `json:"name"`
+	IsDefault     bool       `json:"is_default"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type CreateScheduleProfileRequest struct {
+	Name      string     `json:"name"`
+	TermID    *uuid.UUID `json:"term_id,omitempty"`
+	IsDefault bool       `json:"is_default,omitempty"`
+}
+
+// ScheduleSlot is a reusable time block: a lesson slot or a non-teaching
+// activity (break, lunch, assembly). Sequence is the position within that
+// day's schedule - a display property, not a global identity.
+type ScheduleSlot struct {
+	ID              uuid.UUID `json:"id"`
+	InstitutionID   uuid.UUID `json:"institution_id"`
+	ProfileID       uuid.UUID `json:"profile_id"`
+	DayOfWeek       int       `json:"day_of_week"`
+	Sequence        int       `json:"sequence"`
+	StartTime       string    `json:"start_time"`
+	EndTime         string    `json:"end_time"`
+	SlotType        string    `json:"slot_type"`
+	IsInstructional bool      `json:"is_instructional"`
+	IsActive        bool      `json:"is_active"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type CreateScheduleSlotRequest struct {
+	DayOfWeek       int    `json:"day_of_week"`
+	Sequence        int    `json:"sequence"`
+	StartTime       string `json:"start_time"`
+	EndTime         string `json:"end_time"`
+	SlotType        string `json:"slot_type"`
+	IsInstructional *bool  `json:"is_instructional,omitempty"`
+	IsActive        *bool  `json:"is_active,omitempty"`
+}
+
+type UpdateScheduleSlotRequest struct {
+	StartTime       *string `json:"start_time,omitempty"`
+	EndTime         *string `json:"end_time,omitempty"`
+	SlotType        *string `json:"slot_type,omitempty"`
+	IsInstructional *bool   `json:"is_instructional,omitempty"`
+	IsActive        *bool   `json:"is_active,omitempty"`
+}
+
+// BulkCreateScheduleSlotsRequest creates the same time block on several
+// days at once (e.g. Mon–Fri). Each day still gets its own independent
+// schedule_slots row, so an admin can later edit a single day to diverge
+// without affecting the others.
+type BulkCreateScheduleSlotsRequest struct {
+	Days            []int `json:"days"`
+	Sequence        int   `json:"sequence"`
+	StartTime       string `json:"start_time"`
+	EndTime         string `json:"end_time"`
+	SlotType        string `json:"slot_type"`
+	IsInstructional *bool  `json:"is_instructional,omitempty"`
+	IsActive        *bool  `json:"is_active,omitempty"`
+}
+
+// BulkSlotFailure reports one day (and sequence) that could not be created
+// or updated during a bulk operation. The rest of the batch still applies.
+type BulkSlotFailure struct {
+	DayOfWeek int    `json:"day_of_week"`
+	Sequence  int    `json:"sequence"`
+	Error     string `json:"error"`
+}
+
+type BulkCreateScheduleSlotsResult struct {
+	Created []*ScheduleSlot   `json:"created"`
+	Failed  []BulkSlotFailure `json:"failed"`
+}
+
+// CopyScheduleDayRequest copies every live slot from FromDay to each day in
+// ToDays. With Overwrite=false conflicting slots are skipped and reported;
+// with Overwrite=true the target days are cleared first, then copied.
+type CopyScheduleDayRequest struct {
+	FromDay   int   `json:"from_day"`
+	ToDays    []int `json:"to_days"`
+	Overwrite bool  `json:"overwrite,omitempty"`
+}
+
+// PropagateScheduleSlotRequest applies a time/type correction made on one
+// slot to the same-sequence slots on TargetDays (e.g. fix Monday period 1
+// and propagate to Tue–Fri). Days with no matching sequence are reported
+// in Skipped, not treated as errors.
+type PropagateScheduleSlotRequest struct {
+	StartTime       *string `json:"start_time,omitempty"`
+	EndTime         *string `json:"end_time,omitempty"`
+	SlotType        *string `json:"slot_type,omitempty"`
+	IsInstructional *bool   `json:"is_instructional,omitempty"`
+	IsActive        *bool   `json:"is_active,omitempty"`
+	TargetDays      []int   `json:"target_days"`
+}
+
+type PropagateScheduleSlotResult struct {
+	Updated []*ScheduleSlot   `json:"updated"`
+	Skipped []BulkSlotFailure `json:"skipped"`
+}
+
+// LessonRequirement is a class's weekly demand for one academic offering:
+// how many sessions, in what shapes (single/double/triple blocks), with
+// spread rules. The generator (later phase) consumes these; CRUD here only
+// records what the institution configured.
+type LessonRequirement struct {
+	ID                 uuid.UUID `json:"id"`
+	InstitutionID      uuid.UUID `json:"institution_id"`
+	ClassID            uuid.UUID `json:"class_id"`
+	AcademicOfferingID uuid.UUID `json:"academic_offering_id"`
+	OfferingName       string    `json:"offering_name"`
+	OfferingType       string    `json:"offering_type"`
+	TermID             uuid.UUID `json:"term_id"`
+	SessionsPerWeek    int       `json:"sessions_per_week"`
+	AllowSingle        bool      `json:"allow_single"`
+	AllowDouble        bool      `json:"allow_double"`
+	AllowTriple        bool      `json:"allow_triple"`
+	SpreadAcrossDays   bool      `json:"spread_across_days"`
+	MaxPerDay          *int      `json:"max_per_day,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+type UpsertLessonRequirementRequest struct {
+	TermID             uuid.UUID `json:"term_id"`
+	AcademicOfferingID uuid.UUID `json:"academic_offering_id"`
+	SessionsPerWeek    int       `json:"sessions_per_week"`
+	AllowSingle        bool      `json:"allow_single"`
+	AllowDouble        bool      `json:"allow_double"`
+	AllowTriple        bool      `json:"allow_triple"`
+	SpreadAcrossDays   bool      `json:"spread_across_days"`
+	MaxPerDay          *int      `json:"max_per_day,omitempty"`
 }

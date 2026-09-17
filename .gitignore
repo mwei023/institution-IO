@@ -28,6 +28,18 @@ google-credentials*.json
 mpesa-credentials*
 jwt-secret*
 keystore*
+# Pilot P0-1: session dumps, login tokens, seed payloads must never be tracked
+*_login.json
+cookies.txt
+comp_*.json
+entries_*.json
+fee_structure.json
+generate_*.json
+regen_result.json
+admin_login.json
+margaret_login.json
+teacher_login.json
+opencode.md
 
 # ------------------------------------------------------------
 # NODE / NEXT.JS (Frontend)

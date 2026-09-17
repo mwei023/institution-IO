@@ -445,12 +445,25 @@ func (h *Handler) PublishReportCard(w http.ResponseWriter, r *http.Request) {
 // GetChildReportCard handles GET /api/v1/parent/children/{id}/report-card
 func (h *Handler) GetChildReportCard(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
 	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
 		return
 	}
-
+	// Pilot P0-4: parent role must prove linkage; staff callers (shared
+	// handler shape) skip the check only when they carry grades:read.
+	if claims != nil && claims.Role == "parent" {
+		parentID, perr := uuid.Parse(claims.UserID)
+		if perr != nil {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid user")
+			return
+		}
+		if verr := h.svc.VerifyParentChild(r.Context(), institutionID, parentID, studentID); verr != nil {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Not linked to student")
+			return
+		}
+	}
 	rc, err := h.svc.GetChildReportCard(r.Context(), institutionID, studentID)
 	if err != nil {
 		if errors.Is(err, ErrReportCardNotFound) {
@@ -467,12 +480,23 @@ func (h *Handler) GetChildReportCard(w http.ResponseWriter, r *http.Request) {
 // GetChildSubjectScores handles GET /api/v1/parent/children/{id}/subject-scores
 func (h *Handler) GetChildSubjectScores(w http.ResponseWriter, r *http.Request) {
 	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
 	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
 		return
 	}
-
+	if claims != nil && claims.Role == "parent" {
+		parentID, perr := uuid.Parse(claims.UserID)
+		if perr != nil {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid user")
+			return
+		}
+		if verr := h.svc.VerifyParentChild(r.Context(), institutionID, parentID, studentID); verr != nil {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Not linked to student")
+			return
+		}
+	}
 	scores, err := h.svc.GetChildSubjectScores(r.Context(), institutionID, studentID)
 	if err != nil {
 		log.Error().Err(err).Msg("get child subject scores")
@@ -480,6 +504,52 @@ func (h *Handler) GetChildSubjectScores(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	response.Ok(w, scores)
+}
+
+// GetChildAttendanceSummary handles GET /api/v1/parent/children/{id}/attendance
+// Pilot P0-4: replaces the shared class-level summary on the parent route so
+// a parent can only ever see their own child's class. class_id query param
+// is ignored; dates are optional (default last 3 months).
+func (h *Handler) GetChildAttendanceSummary(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	claims := auth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing auth")
+		return
+	}
+	parentID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid user")
+		return
+	}
+	studentID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid student ID")
+		return
+	}
+	startDate := time.Now().AddDate(0, -3, 0)
+	endDate := time.Now()
+	if s := r.URL.Query().Get("start_date"); s != "" {
+		if t, err := time.Parse("2006-01-02", s); err == nil {
+			startDate = t
+		}
+	}
+	if e := r.URL.Query().Get("end_date"); e != "" {
+		if t, err := time.Parse("2006-01-02", e); err == nil {
+			endDate = t
+		}
+	}
+	summary, err := h.svc.GetChildAttendanceSummary(r.Context(), institutionID, parentID, studentID, startDate, endDate)
+	if err != nil {
+		if err.Error() == "not linked to student" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Not linked to student")
+			return
+		}
+		log.Error().Err(err).Msg("get child attendance summary")
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, summary)
 }
 
 // ListTerms handles GET /api/v1/academics/terms
@@ -614,4 +684,294 @@ func (h *Handler) CreateTimetablePeriod(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	response.Created(w, p)
+}
+
+// ── Timetable engine ─────────────────────────────────────────────
+
+// ListScheduleProfiles handles GET /api/v1/academics/schedule-profiles
+func (h *Handler) ListScheduleProfiles(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	profiles, err := h.svc.ListScheduleProfiles(r.Context(), institutionID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, profiles)
+}
+
+// CreateScheduleProfile handles POST /api/v1/academics/schedule-profiles
+func (h *Handler) CreateScheduleProfile(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	var req CreateScheduleProfileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	p, err := h.svc.CreateScheduleProfile(r.Context(), institutionID, &req)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "PROFILE_ERROR", err.Error())
+		return
+	}
+	response.Created(w, p)
+}
+
+// ListScheduleSlots handles GET /api/v1/academics/schedule-profiles/{id}/slots
+func (h *Handler) ListScheduleSlots(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	profileID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid profile ID")
+		return
+	}
+	slots, err := h.svc.ListScheduleSlots(r.Context(), institutionID, profileID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, slots)
+}
+
+// CreateScheduleSlot handles POST /api/v1/academics/schedule-profiles/{id}/slots
+func (h *Handler) CreateScheduleSlot(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	profileID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid profile ID")
+		return
+	}
+	var req CreateScheduleSlotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	s, err := h.svc.CreateScheduleSlot(r.Context(), institutionID, profileID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScheduleProfileNotFound):
+			response.Error(w, http.StatusNotFound, "PROFILE_NOT_FOUND", err.Error())
+		case errors.Is(err, ErrSlotSequenceTaken), errors.Is(err, ErrSlotOverlaps):
+			response.Error(w, http.StatusConflict, "SLOT_CONFLICT", err.Error())
+		default:
+			response.Error(w, http.StatusBadRequest, "SLOT_ERROR", err.Error())
+		}
+		return
+	}
+	response.Created(w, s)
+}
+
+// UpdateScheduleSlot handles PATCH /api/v1/academics/schedule-slots/{id}
+func (h *Handler) UpdateScheduleSlot(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	slotID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid slot ID")
+		return
+	}
+	var req UpdateScheduleSlotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	s, err := h.svc.UpdateScheduleSlot(r.Context(), institutionID, slotID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScheduleSlotNotFound):
+			response.Error(w, http.StatusNotFound, "SLOT_NOT_FOUND", err.Error())
+		case errors.Is(err, ErrSlotOverlaps):
+			response.Error(w, http.StatusConflict, "SLOT_CONFLICT", err.Error())
+		default:
+			response.Error(w, http.StatusBadRequest, "SLOT_ERROR", err.Error())
+		}
+		return
+	}
+	response.Ok(w, s)
+}
+
+// DeleteScheduleSlot handles DELETE /api/v1/academics/schedule-slots/{id}
+func (h *Handler) DeleteScheduleSlot(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	slotID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid slot ID")
+		return
+	}
+	if err := h.svc.DeleteScheduleSlot(r.Context(), institutionID, slotID); err != nil {
+		if errors.Is(err, ErrScheduleSlotNotFound) {
+			response.Error(w, http.StatusNotFound, "SLOT_NOT_FOUND", err.Error())
+			return
+		}
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, map[string]bool{"deleted": true})
+}
+
+// CreateScheduleSlotsBulk handles POST /api/v1/academics/schedule-profiles/{id}/slots/bulk.
+// It creates the same time block on several days at once; conflicting days
+// are skipped and reported per day, the rest commit.
+func (h *Handler) CreateScheduleSlotsBulk(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	profileID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid profile ID")
+		return
+	}
+	var req BulkCreateScheduleSlotsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	res, err := h.svc.CreateScheduleSlotsBulk(r.Context(), institutionID, profileID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScheduleProfileNotFound):
+			response.Error(w, http.StatusNotFound, "PROFILE_NOT_FOUND", err.Error())
+		default:
+			response.Error(w, http.StatusBadRequest, "SLOT_ERROR", err.Error())
+		}
+		return
+	}
+	response.Created(w, res)
+}
+
+// CopyScheduleDay handles POST /api/v1/academics/schedule-profiles/{id}/slots/copy.
+// It copies every live slot from one day to several others.
+func (h *Handler) CopyScheduleDay(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	profileID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid profile ID")
+		return
+	}
+	var req CopyScheduleDayRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	res, err := h.svc.CopyScheduleDay(r.Context(), institutionID, profileID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScheduleProfileNotFound):
+			response.Error(w, http.StatusNotFound, "PROFILE_NOT_FOUND", err.Error())
+		default:
+			response.Error(w, http.StatusBadRequest, "SLOT_ERROR", err.Error())
+		}
+		return
+	}
+	response.Created(w, res)
+}
+
+// PropagateScheduleSlot handles POST /api/v1/academics/schedule-slots/{id}/propagate.
+// It applies a correction made on one slot to the same-sequence slots on the
+// target days; days with no match or a conflict are reported, not fatal.
+func (h *Handler) PropagateScheduleSlot(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	slotID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid slot ID")
+		return
+	}
+	var req PropagateScheduleSlotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	res, err := h.svc.PropagateScheduleSlot(r.Context(), institutionID, slotID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScheduleSlotNotFound):
+			response.Error(w, http.StatusNotFound, "SLOT_NOT_FOUND", err.Error())
+		case errors.Is(err, ErrSlotOverlaps):
+			response.Error(w, http.StatusConflict, "SLOT_CONFLICT", err.Error())
+		default:
+			response.Error(w, http.StatusBadRequest, "SLOT_ERROR", err.Error())
+		}
+		return
+	}
+	response.Ok(w, res)
+}
+
+// ListLessonRequirements handles GET /api/v1/academics/classes/{id}/lesson-requirements
+func (h *Handler) ListLessonRequirements(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	classID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid class ID")
+		return
+	}
+	termID, err := uuid.Parse(r.URL.Query().Get("term_id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_TERM_ID", "Valid term_id is required")
+		return
+	}
+	reqs, err := h.svc.ListLessonRequirements(r.Context(), institutionID, classID, termID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, reqs)
+}
+
+// UpsertLessonRequirement handles PUT /api/v1/academics/classes/{id}/lesson-requirements
+func (h *Handler) UpsertLessonRequirement(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	classID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid class ID")
+		return
+	}
+	var req UpsertLessonRequirementRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body")
+		return
+	}
+	lr, err := h.svc.UpsertLessonRequirement(r.Context(), institutionID, classID, &req)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "REQUIREMENT_ERROR", err.Error())
+		return
+	}
+	response.Ok(w, lr)
+}
+
+// DeleteLessonRequirement handles DELETE /api/v1/academics/lesson-requirements/{id}
+func (h *Handler) DeleteLessonRequirement(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	requirementID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid requirement ID")
+		return
+	}
+	if err := h.svc.DeleteLessonRequirement(r.Context(), institutionID, requirementID); err != nil {
+		if errors.Is(err, ErrLessonRequirementNotFound) {
+			response.Error(w, http.StatusNotFound, "REQUIREMENT_NOT_FOUND", err.Error())
+			return
+		}
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, map[string]bool{"deleted": true})
+}
+
+// GetTeacherTimetable handles GET /api/v1/academics/teachers/{id}/timetable
+func (h *Handler) GetTeacherTimetable(w http.ResponseWriter, r *http.Request) {
+	institutionID := auth.InstitutionIDFromContext(r.Context())
+	teacherID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_ID", "Invalid teacher ID")
+		return
+	}
+
+	var termID *uuid.UUID
+	if termIDStr := r.URL.Query().Get("term_id"); termIDStr != "" {
+		if id, err := uuid.Parse(termIDStr); err == nil {
+			termID = &id
+		}
+	}
+
+	periods, err := h.svc.GetTeacherTimetable(r.Context(), institutionID, teacherID, termID)
+	if err != nil {
+		response.InternalError(w)
+		return
+	}
+	response.Ok(w, periods)
 }

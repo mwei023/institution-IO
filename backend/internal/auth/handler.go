@@ -65,6 +65,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.setRefreshCookie(w, resp.RefreshToken)
+	h.setAccessCookie(w, resp.AccessToken)
 	response.Ok(w, resp)
 }
 
@@ -93,6 +94,7 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.setRefreshCookie(w, resp.RefreshToken)
+	h.setAccessCookie(w, resp.AccessToken)
 	response.Ok(w, resp)
 }
 
@@ -104,6 +106,33 @@ func (h *Handler) setRefreshCookie(w http.ResponseWriter, token string) {
 		Expires:  time.Now().Add(h.svc.cfg.JWTRefreshTTL),
 		HttpOnly: true,
 		Secure:   h.svc.cfg.IsProduction(), // allow http:// in local dev
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+// setAccessCookie mirrors the access token into an httpOnly cookie (P0-4).
+// The frontend still sends Bearer today; the cookie lets it drop
+// localStorage without a backend change (middleware reads either).
+func (h *Handler) setAccessCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    token,
+		Path:     "/api/v1",
+		Expires:  time.Now().Add(h.svc.cfg.JWTAccessTTL),
+		HttpOnly: true,
+		Secure:   h.svc.cfg.IsProduction(),
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (h *Handler) clearAccessCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    "",
+		Path:     "/api/v1",
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   h.svc.cfg.IsProduction(),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -126,6 +155,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		_ = h.svc.repo.RevokeRefreshToken(r.Context(), hashRefreshToken(cookie.Value))
 	}
 	h.clearRefreshCookie(w)
+	h.clearAccessCookie(w)
 	response.NoContent(w)
 }
 
@@ -157,6 +187,7 @@ func (h *Handler) VerifyMFA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.setRefreshCookie(w, resp.RefreshToken)
+	h.setAccessCookie(w, resp.AccessToken)
 	response.Ok(w, resp)
 }
 

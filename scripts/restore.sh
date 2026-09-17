@@ -33,7 +33,7 @@ if [[ "${BACKUP_FILE}" =~ _daily_ ]]; then
   BACKUP_TYPE="daily"
 elif [[ "${BACKUP_FILE}" =~ _weekly_ ]]; then
   BACKUP_TYPE="weekly"
-elif [[ "${BACKUP_TYPE}" =~ _monthly_ ]]; then
+elif [[ "${BACKUP_FILE}" =~ _monthly_ ]]; then
   BACKUP_TYPE="monthly"
 else
   BACKUP_TYPE="daily"

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"institution-os/pkg/db"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/rs/zerolog/log" 
 )
 
@@ -31,6 +32,38 @@ type Repository struct {
 // NewRepository creates a new academics repository.
 func NewRepository(db *db.Pool) *Repository {
 	return &Repository{db: db}
+}
+
+// IsChildOfParent reports whether studentID is linked to parentUserID.
+// Same SQL as student.Repository — duplicated so parent handlers in this
+// domain can enforce ownership without cross-package repo coupling. P0-4.
+func (r *Repository) IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM student_parent_links spl
+			JOIN parent_guardians pg ON pg.id = spl.parent_id
+			WHERE spl.institution_id = $1 AND pg.user_id = $2 AND spl.student_id = $3
+		)`, institutionID, parentUserID, studentID).Scan(&exists)
+	return exists, err
+}
+
+// GetStudentCurrentClass resolves a student's class (pilot P0-4: parent
+// attendance must follow the child, never a caller-supplied class_id).
+func (r *Repository) GetStudentCurrentClass(ctx context.Context, institutionID, studentID uuid.UUID) (uuid.UUID, error) {
+	var classID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		SELECT current_class_id FROM students
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		studentID, institutionID,
+	).Scan(&classID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, ErrClassNotFound
+		}
+		return uuid.Nil, err
+	}
+	return classID, nil
 }
 
 // ─── Classes ──────────────────────────────────────────────────────
@@ -1231,6 +1264,7 @@ var (
 func (r *Repository) ListTeachingAssignmentsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TeachingAssignmentOption, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ta.id,
+		       ta.academic_offering_id,
 		       COALESCE(sub.name, la.name)                          AS offering_name,
 		       CASE WHEN ao.subject_id IS NOT NULL THEN 'subject' ELSE 'learning_area' END AS offering_type,
 		       ta.teacher_id,
@@ -1253,7 +1287,7 @@ func (r *Repository) ListTeachingAssignmentsForClass(ctx context.Context, instit
 	options := []*TeachingAssignmentOption{}
 	for rows.Next() {
 		var o TeachingAssignmentOption
-		if err := rows.Scan(&o.ID, &o.OfferingName, &o.OfferingType, &o.TeacherID, &o.TeacherName); err != nil {
+		if err := rows.Scan(&o.ID, &o.AcademicOfferingID, &o.OfferingName, &o.OfferingType, &o.TeacherID, &o.TeacherName); err != nil {
 			return nil, err
 		}
 		options = append(options, &o)
@@ -1300,15 +1334,25 @@ func (r *Repository) CreateTimetablePeriod(ctx context.Context, institutionID uu
 	}
 
 	// Lock and check: is this class's slot already taken?
-	var slotCount int
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM timetable_periods
+	// NOTE: Postgres does not allow FOR UPDATE with aggregate functions
+	// (SELECT COUNT(*) ... FOR UPDATE errors), so select the row ids and
+	// count in Go instead.
+	rows, err := tx.Query(ctx, `
+		SELECT id FROM timetable_periods
 		WHERE institution_id = $1 AND class_id = $2 AND term_id = $3
 		  AND day_of_week = $4 AND period_number = $5 AND deleted_at IS NULL
 		FOR UPDATE`,
 		institutionID, req.ClassID, req.TermID, req.DayOfWeek, req.PeriodNumber,
-	).Scan(&slotCount)
+	)
 	if err != nil {
+		return nil, fmt.Errorf("check slot conflict: %w", err)
+	}
+	slotCount := 0
+	for rows.Next() {
+		slotCount++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("check slot conflict: %w", err)
 	}
 	if slotCount > 0 {
@@ -1358,4 +1402,787 @@ func (r *Repository) CreateTimetablePeriod(ctx context.Context, institutionID uu
 		return nil, fmt.Errorf("commit create timetable period: %w", err)
 	}
 	return p, nil
+}
+
+// ── Timetable engine: schedule profiles, slots, requirements ────
+
+var (
+	ErrScheduleProfileNotFound    = errors.New("schedule profile not found")
+	ErrScheduleSlotNotFound       = errors.New("schedule slot not found")
+	ErrSlotSequenceTaken          = errors.New("this day already has a slot at that sequence")
+	ErrSlotOverlaps               = errors.New("this slot overlaps an existing active slot on the same day")
+	ErrLessonRequirementNotFound  = errors.New("lesson requirement not found")
+)
+
+func (r *Repository) ListScheduleProfiles(ctx context.Context, institutionID uuid.UUID) ([]*ScheduleProfile, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, institution_id, term_id, name, is_default, created_at, updated_at
+		FROM schedule_profiles
+		WHERE institution_id = $1 AND deleted_at IS NULL
+		ORDER BY is_default DESC, name`,
+		institutionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*ScheduleProfile
+	for rows.Next() {
+		var p ScheduleProfile
+		if err := rows.Scan(
+			&p.ID, &p.InstitutionID, &p.TermID, &p.Name, &p.IsDefault,
+			&p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, &p)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) CreateScheduleProfile(ctx context.Context, institutionID uuid.UUID, req *CreateScheduleProfileRequest) (*ScheduleProfile, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin create schedule profile: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if req.IsDefault {
+		if _, err := tx.Exec(ctx, `
+			UPDATE schedule_profiles SET is_default = false, updated_at = NOW()
+			WHERE institution_id = $1 AND is_default AND deleted_at IS NULL`,
+			institutionID,
+		); err != nil {
+			return nil, fmt.Errorf("clear default profile: %w", err)
+		}
+	}
+
+	var p ScheduleProfile
+	err = tx.QueryRow(ctx, `
+		INSERT INTO schedule_profiles
+			(id, institution_id, term_id, name, is_default, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
+		RETURNING id, institution_id, term_id, name, is_default, created_at, updated_at`,
+		uuid.New(), institutionID, req.TermID, req.Name, req.IsDefault,
+	).Scan(&p.ID, &p.InstitutionID, &p.TermID, &p.Name, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create schedule profile: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create schedule profile: %w", err)
+	}
+	return &p, nil
+}
+
+func (r *Repository) ListScheduleSlots(ctx context.Context, institutionID, profileID uuid.UUID) ([]*ScheduleSlot, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, institution_id, profile_id, day_of_week, sequence,
+		       to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI'),
+		       slot_type, is_instructional, is_active, created_at, updated_at
+		FROM schedule_slots
+		WHERE institution_id = $1 AND profile_id = $2 AND deleted_at IS NULL
+		ORDER BY day_of_week, sequence`,
+		institutionID, profileID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*ScheduleSlot
+	for rows.Next() {
+		var s ScheduleSlot
+		if err := rows.Scan(
+			&s.ID, &s.InstitutionID, &s.ProfileID, &s.DayOfWeek, &s.Sequence,
+			&s.StartTime, &s.EndTime, &s.SlotType, &s.IsInstructional, &s.IsActive,
+			&s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, &s)
+	}
+	return out, rows.Err()
+}
+
+// slotsOverlap reports whether [newStart,newEnd) intersects any active
+// same-day slot. Times are "HH:MM".
+func slotsOverlap(newStart, newEnd time.Time, rows []struct{ Start, End time.Time }) bool {
+	for _, r := range rows {
+		if newStart.Before(r.End) && r.Start.Before(newEnd) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Repository) CreateScheduleSlot(ctx context.Context, institutionID, profileID uuid.UUID, req *CreateScheduleSlotRequest) (*ScheduleSlot, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin create schedule slot: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var profileIDCheck uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM schedule_profiles
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		profileID, institutionID,
+	).Scan(&profileIDCheck)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrScheduleProfileNotFound
+		}
+		return nil, fmt.Errorf("resolve schedule profile: %w", err)
+	}
+
+	isActive := true
+	if req.IsActive != nil {
+		isActive = *req.IsActive
+	}
+	isInstructional := true
+	if req.IsInstructional != nil {
+		isInstructional = *req.IsInstructional
+	}
+
+	s, err := insertScheduleSlotTx(ctx, tx, institutionID, profileID,
+		req.DayOfWeek, req.Sequence, req.StartTime, req.EndTime,
+		req.SlotType, isInstructional, isActive)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create schedule slot: %w", err)
+	}
+	return s, nil
+}
+
+// insertScheduleSlotTx inserts one slot inside the caller's transaction,
+// enforcing the per-day sequence guard and the overlap guard. The caller
+// must have verified the profile. Times are "HH:MM".
+func insertScheduleSlotTx(ctx context.Context, tx pgx.Tx, institutionID, profileID uuid.UUID, day, sequence int, startTime, endTime, slotType string, isInstructional, isActive bool) (*ScheduleSlot, error) {
+	newStart, err := time.Parse("15:04", startTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start_time: %w", err)
+	}
+	newEnd, err := time.Parse("15:04", endTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end_time: %w", err)
+	}
+	if !newEnd.After(newStart) {
+		return nil, fmt.Errorf("end_time must be after start_time")
+	}
+
+	var taken uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM schedule_slots
+		WHERE profile_id = $1 AND day_of_week = $2 AND sequence = $3 AND deleted_at IS NULL
+		FOR UPDATE`,
+		profileID, day, sequence,
+	).Scan(&taken)
+	if err == nil {
+		return nil, ErrSlotSequenceTaken
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check slot sequence: %w", err)
+	}
+
+	if isActive {
+		if err := checkSlotOverlap(ctx, tx, profileID, day, nil, newStart, newEnd); err != nil {
+			return nil, err
+		}
+	}
+
+	var s ScheduleSlot
+	err = tx.QueryRow(ctx, `
+		INSERT INTO schedule_slots
+			(id, institution_id, profile_id, day_of_week, sequence,
+			 start_time, end_time, slot_type, is_instructional, is_active,
+			 created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+		RETURNING id, institution_id, profile_id, day_of_week, sequence,
+			to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI'),
+			slot_type, is_instructional, is_active, created_at, updated_at`,
+		uuid.New(), institutionID, profileID, day, sequence,
+		startTime, endTime, slotType, isInstructional, isActive,
+	).Scan(
+		&s.ID, &s.InstitutionID, &s.ProfileID, &s.DayOfWeek, &s.Sequence,
+		&s.StartTime, &s.EndTime, &s.SlotType, &s.IsInstructional, &s.IsActive,
+		&s.CreatedAt, &s.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create schedule slot: %w", err)
+	}
+	return &s, nil
+}
+
+// CreateScheduleSlotsBulk creates the same time block on several days in one
+// transaction. Conflicting days are skipped and reported; the rest commit.
+func (r *Repository) CreateScheduleSlotsBulk(ctx context.Context, institutionID, profileID uuid.UUID, req *BulkCreateScheduleSlotsRequest) (*BulkCreateScheduleSlotsResult, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin bulk create schedule slots: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var profileIDCheck uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM schedule_profiles
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		profileID, institutionID,
+	).Scan(&profileIDCheck)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrScheduleProfileNotFound
+		}
+		return nil, fmt.Errorf("resolve schedule profile: %w", err)
+	}
+
+	isActive := true
+	if req.IsActive != nil {
+		isActive = *req.IsActive
+	}
+	isInstructional := true
+	if req.IsInstructional != nil {
+		isInstructional = *req.IsInstructional
+	}
+
+	result := &BulkCreateScheduleSlotsResult{}
+	seen := map[int]bool{}
+	for _, day := range req.Days {
+		if seen[day] {
+			continue
+		}
+		seen[day] = true
+		s, err := insertScheduleSlotTx(ctx, tx, institutionID, profileID,
+			day, req.Sequence, req.StartTime, req.EndTime,
+			req.SlotType, isInstructional, isActive)
+		if err != nil {
+			if errors.Is(err, ErrSlotSequenceTaken) || errors.Is(err, ErrSlotOverlaps) {
+				result.Failed = append(result.Failed, BulkSlotFailure{DayOfWeek: day, Sequence: req.Sequence, Error: err.Error()})
+				continue
+			}
+			return nil, err
+		}
+		result.Created = append(result.Created, s)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit bulk create schedule slots: %w", err)
+	}
+	return result, nil
+}
+
+// CopyScheduleDay copies every live slot from one day to several others.
+// With overwrite=false conflicts are skipped per slot; with overwrite=true
+// each target day is cleared first.
+func (r *Repository) CopyScheduleDay(ctx context.Context, institutionID, profileID uuid.UUID, req *CopyScheduleDayRequest) (*BulkCreateScheduleSlotsResult, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin copy schedule day: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var profileIDCheck uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM schedule_profiles
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		profileID, institutionID,
+	).Scan(&profileIDCheck)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrScheduleProfileNotFound
+		}
+		return nil, fmt.Errorf("resolve schedule profile: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT sequence,
+		       to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI'),
+		       slot_type, is_instructional, is_active
+		FROM schedule_slots
+		WHERE institution_id = $1 AND profile_id = $2 AND day_of_week = $3 AND deleted_at IS NULL
+		ORDER BY sequence`,
+		institutionID, profileID, req.FromDay,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load source day slots: %w", err)
+	}
+	type sourceSlot struct {
+		sequence        int
+		start, end      string
+		slotType        string
+		isInstructional bool
+		isActive        bool
+	}
+	var sources []sourceSlot
+	for rows.Next() {
+		var ss sourceSlot
+		if err := rows.Scan(&ss.sequence, &ss.start, &ss.end, &ss.slotType, &ss.isInstructional, &ss.isActive); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("load source day slots: %w", err)
+		}
+		sources = append(sources, ss)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load source day slots: %w", err)
+	}
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no live slots found on day %d to copy", req.FromDay)
+	}
+
+	result := &BulkCreateScheduleSlotsResult{}
+	seen := map[int]bool{}
+	for _, day := range req.ToDays {
+		if seen[day] || day == req.FromDay {
+			continue
+		}
+		seen[day] = true
+		if req.Overwrite {
+			if _, err := tx.Exec(ctx, `
+				UPDATE schedule_slots SET deleted_at = NOW(), updated_at = NOW()
+				WHERE profile_id = $1 AND day_of_week = $2 AND deleted_at IS NULL`,
+				profileID, day,
+			); err != nil {
+				return nil, fmt.Errorf("clear target day slots: %w", err)
+			}
+		}
+		for _, ss := range sources {
+			s, err := insertScheduleSlotTx(ctx, tx, institutionID, profileID,
+				day, ss.sequence, ss.start, ss.end, ss.slotType, ss.isInstructional, ss.isActive)
+			if err != nil {
+				if errors.Is(err, ErrSlotSequenceTaken) || errors.Is(err, ErrSlotOverlaps) {
+					result.Failed = append(result.Failed, BulkSlotFailure{DayOfWeek: day, Sequence: ss.sequence, Error: err.Error()})
+					continue
+				}
+				return nil, err
+			}
+			result.Created = append(result.Created, s)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit copy schedule day: %w", err)
+	}
+	return result, nil
+}
+
+// PropagateScheduleSlot applies a correction made on one slot to the
+// same-sequence slots on the target days. Days with no matching slot are
+// reported in Skipped; conflicting days keep their old values and are
+// reported in Skipped as well.
+func (r *Repository) PropagateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *PropagateScheduleSlotRequest) (*PropagateScheduleSlotResult, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin propagate schedule slot: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var src ScheduleSlot
+	err = tx.QueryRow(ctx, `
+		SELECT id, institution_id, profile_id, day_of_week, sequence,
+		       to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI'),
+		       slot_type, is_instructional, is_active, created_at, updated_at
+		FROM schedule_slots
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL
+		FOR UPDATE`,
+		slotID, institutionID,
+	).Scan(
+		&src.ID, &src.InstitutionID, &src.ProfileID, &src.DayOfWeek, &src.Sequence,
+		&src.StartTime, &src.EndTime, &src.SlotType, &src.IsInstructional, &src.IsActive,
+		&src.CreatedAt, &src.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrScheduleSlotNotFound
+		}
+		return nil, fmt.Errorf("resolve schedule slot: %w", err)
+	}
+
+	applyPatch := func(s *ScheduleSlot) {
+		if req.StartTime != nil {
+			s.StartTime = *req.StartTime
+		}
+		if req.EndTime != nil {
+			s.EndTime = *req.EndTime
+		}
+		if req.SlotType != nil {
+			s.SlotType = *req.SlotType
+		}
+		if req.IsInstructional != nil {
+			s.IsInstructional = *req.IsInstructional
+		}
+		if req.IsActive != nil {
+			s.IsActive = *req.IsActive
+		}
+	}
+	validateTimes := func(s *ScheduleSlot) (time.Time, time.Time, error) {
+		newStart, err := time.Parse("15:04", s.StartTime)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start_time: %w", err)
+		}
+		newEnd, err := time.Parse("15:04", s.EndTime)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end_time: %w", err)
+		}
+		if !newEnd.After(newStart) {
+			return time.Time{}, time.Time{}, fmt.Errorf("end_time must be after start_time")
+		}
+		return newStart, newEnd, nil
+	}
+	persistSlot := func(s *ScheduleSlot) error {
+		return tx.QueryRow(ctx, `
+			UPDATE schedule_slots
+			SET start_time = $3, end_time = $4, slot_type = $5,
+			    is_instructional = $6, is_active = $7, updated_at = NOW()
+			WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL
+			RETURNING updated_at`,
+			s.ID, institutionID, s.StartTime, s.EndTime, s.SlotType,
+			s.IsInstructional, s.IsActive,
+		).Scan(&s.UpdatedAt)
+	}
+
+	applyPatch(&src)
+	srcStart, srcEnd, err := validateTimes(&src)
+	if err != nil {
+		return nil, err
+	}
+	if src.IsActive {
+		if err := checkSlotOverlap(ctx, tx, src.ProfileID, src.DayOfWeek, &src.ID, srcStart, srcEnd); err != nil {
+			return nil, err
+		}
+	}
+	if err := persistSlot(&src); err != nil {
+		return nil, fmt.Errorf("update source schedule slot: %w", err)
+	}
+
+	result := &PropagateScheduleSlotResult{Updated: []*ScheduleSlot{&src}}
+	seen := map[int]bool{}
+	for _, day := range req.TargetDays {
+		if seen[day] || day == src.DayOfWeek {
+			continue
+		}
+		seen[day] = true
+		var tgt ScheduleSlot
+		err := tx.QueryRow(ctx, `
+			SELECT id, institution_id, profile_id, day_of_week, sequence,
+			       to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI'),
+			       slot_type, is_instructional, is_active, created_at, updated_at
+			FROM schedule_slots
+			WHERE profile_id = $1 AND day_of_week = $2 AND sequence = $3 AND deleted_at IS NULL
+			FOR UPDATE`,
+			src.ProfileID, day, src.Sequence,
+		).Scan(
+			&tgt.ID, &tgt.InstitutionID, &tgt.ProfileID, &tgt.DayOfWeek, &tgt.Sequence,
+			&tgt.StartTime, &tgt.EndTime, &tgt.SlotType, &tgt.IsInstructional, &tgt.IsActive,
+			&tgt.CreatedAt, &tgt.UpdatedAt,
+		)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				result.Skipped = append(result.Skipped, BulkSlotFailure{DayOfWeek: day, Sequence: src.Sequence, Error: "no slot at this sequence on that day"})
+				continue
+			}
+			return nil, fmt.Errorf("resolve target schedule slot: %w", err)
+		}
+		applyPatch(&tgt)
+		newStart, newEnd, err := validateTimes(&tgt)
+		if err != nil {
+			result.Skipped = append(result.Skipped, BulkSlotFailure{DayOfWeek: day, Sequence: src.Sequence, Error: err.Error()})
+			continue
+		}
+		if tgt.IsActive {
+			if err := checkSlotOverlap(ctx, tx, tgt.ProfileID, tgt.DayOfWeek, &tgt.ID, newStart, newEnd); err != nil {
+				result.Skipped = append(result.Skipped, BulkSlotFailure{DayOfWeek: day, Sequence: src.Sequence, Error: err.Error()})
+				continue
+			}
+		}
+		if err := persistSlot(&tgt); err != nil {
+			return nil, fmt.Errorf("update target schedule slot: %w", err)
+		}
+		tgtCopy := tgt
+		result.Updated = append(result.Updated, &tgtCopy)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit propagate schedule slot: %w", err)
+	}
+	return result, nil
+}
+
+// checkSlotOverlap errors with ErrSlotOverlaps when [newStart,newEnd)
+// intersects an active same-day slot other than excludeID (nil = none).
+func checkSlotOverlap(ctx context.Context, tx pgx.Tx, profileID uuid.UUID, day int, excludeID *uuid.UUID, newStart, newEnd time.Time) error {
+	rows, err := tx.Query(ctx, `
+		SELECT to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI')
+		FROM schedule_slots
+		WHERE profile_id = $1 AND day_of_week = $2
+		  AND is_active AND deleted_at IS NULL
+		  AND ($3::uuid IS NULL OR id <> $3)`,
+		profileID, day, excludeID,
+	)
+	if err != nil {
+		return fmt.Errorf("check slot overlap: %w", err)
+	}
+	defer rows.Close()
+
+	var existing []struct{ Start, End time.Time }
+	for rows.Next() {
+		var s, e string
+		if err := rows.Scan(&s, &e); err != nil {
+			return fmt.Errorf("check slot overlap: %w", err)
+		}
+		start, err := time.Parse("15:04", s)
+		if err != nil {
+			return fmt.Errorf("check slot overlap: %w", err)
+		}
+		end, err := time.Parse("15:04", e)
+		if err != nil {
+			return fmt.Errorf("check slot overlap: %w", err)
+		}
+		existing = append(existing, struct{ Start, End time.Time }{start, end})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("check slot overlap: %w", err)
+	}
+	if slotsOverlap(newStart, newEnd, existing) {
+		return ErrSlotOverlaps
+	}
+	return nil
+}
+
+func (r *Repository) UpdateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *UpdateScheduleSlotRequest) (*ScheduleSlot, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin update schedule slot: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var s ScheduleSlot
+	err = tx.QueryRow(ctx, `
+		SELECT id, institution_id, profile_id, day_of_week, sequence,
+		       to_char(start_time, 'HH24:MI'), to_char(end_time, 'HH24:MI'),
+		       slot_type, is_instructional, is_active, created_at, updated_at
+		FROM schedule_slots
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL
+		FOR UPDATE`,
+		slotID, institutionID,
+	).Scan(
+		&s.ID, &s.InstitutionID, &s.ProfileID, &s.DayOfWeek, &s.Sequence,
+		&s.StartTime, &s.EndTime, &s.SlotType, &s.IsInstructional, &s.IsActive,
+		&s.CreatedAt, &s.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrScheduleSlotNotFound
+		}
+		return nil, fmt.Errorf("resolve schedule slot: %w", err)
+	}
+
+	if req.StartTime != nil {
+		s.StartTime = *req.StartTime
+	}
+	if req.EndTime != nil {
+		s.EndTime = *req.EndTime
+	}
+	if req.SlotType != nil {
+		s.SlotType = *req.SlotType
+	}
+	if req.IsInstructional != nil {
+		s.IsInstructional = *req.IsInstructional
+	}
+	if req.IsActive != nil {
+		s.IsActive = *req.IsActive
+	}
+
+	newStart, err := time.Parse("15:04", s.StartTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start_time: %w", err)
+	}
+	newEnd, err := time.Parse("15:04", s.EndTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end_time: %w", err)
+	}
+	if !newEnd.After(newStart) {
+		return nil, fmt.Errorf("end_time must be after start_time")
+	}
+	if s.IsActive {
+		if err := checkSlotOverlap(ctx, tx, s.ProfileID, s.DayOfWeek, &s.ID, newStart, newEnd); err != nil {
+			return nil, err
+		}
+	}
+
+	err = tx.QueryRow(ctx, `
+		UPDATE schedule_slots
+		SET start_time = $3, end_time = $4, slot_type = $5,
+		    is_instructional = $6, is_active = $7, updated_at = NOW()
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL
+		RETURNING updated_at`,
+		s.ID, institutionID, s.StartTime, s.EndTime, s.SlotType,
+		s.IsInstructional, s.IsActive,
+	).Scan(&s.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("update schedule slot: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit update schedule slot: %w", err)
+	}
+	return &s, nil
+}
+
+func (r *Repository) DeleteScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE schedule_slots SET deleted_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		slotID, institutionID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete schedule slot: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrScheduleSlotNotFound
+	}
+	return nil
+}
+
+func scanLessonRequirement(rows pgx.Rows) (*LessonRequirement, error) {
+	var lr LessonRequirement
+	var maxPerDay pgtype.Int4
+	if err := rows.Scan(
+		&lr.ID, &lr.InstitutionID, &lr.ClassID, &lr.AcademicOfferingID,
+		&lr.OfferingName, &lr.OfferingType,
+		&lr.TermID, &lr.SessionsPerWeek,
+		&lr.AllowSingle, &lr.AllowDouble, &lr.AllowTriple,
+		&lr.SpreadAcrossDays, &maxPerDay,
+		&lr.CreatedAt, &lr.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if maxPerDay.Valid {
+		v := int(maxPerDay.Int32)
+		lr.MaxPerDay = &v
+	}
+	return &lr, nil
+}
+
+const lessonRequirementColumns = `
+	lr.id, lr.institution_id, lr.class_id, lr.academic_offering_id,
+	COALESCE(sub.name, la.name),
+	CASE WHEN sub.id IS NOT NULL THEN 'subject'
+	     WHEN la.id IS NOT NULL THEN 'learning_area' END,
+	lr.term_id, lr.sessions_per_week,
+	lr.allow_single, lr.allow_double, lr.allow_triple,
+	lr.spread_across_days, lr.max_per_day,
+	lr.created_at, lr.updated_at
+	FROM lesson_requirements lr
+	JOIN academic_offerings ao ON ao.id = lr.academic_offering_id
+	LEFT JOIN subjects sub ON sub.id = ao.subject_id
+	LEFT JOIN learning_areas la ON la.id = ao.learning_area_id`
+
+func (r *Repository) ListLessonRequirements(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*LessonRequirement, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT `+lessonRequirementColumns+`
+		WHERE lr.institution_id = $1 AND lr.class_id = $2 AND lr.term_id = $3
+		  AND lr.deleted_at IS NULL
+		ORDER BY 5`,
+		institutionID, classID, termID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*LessonRequirement
+	for rows.Next() {
+		lr, err := scanLessonRequirement(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, lr)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) UpsertLessonRequirement(ctx context.Context, institutionID, classID uuid.UUID, req *UpsertLessonRequirementRequest) (*LessonRequirement, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin upsert lesson requirement: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var id uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM lesson_requirements
+		WHERE institution_id = $1 AND class_id = $2
+		  AND academic_offering_id = $3 AND term_id = $4 AND deleted_at IS NULL
+		FOR UPDATE`,
+		institutionID, classID, req.AcademicOfferingID, req.TermID,
+	).Scan(&id)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("resolve lesson requirement: %w", err)
+	}
+
+	if err == nil {
+		_, err = tx.Exec(ctx, `
+			UPDATE lesson_requirements
+			SET sessions_per_week = $2, allow_single = $3, allow_double = $4,
+			    allow_triple = $5, spread_across_days = $6, max_per_day = $7,
+			    updated_at = NOW()
+			WHERE id = $1`,
+			id, req.SessionsPerWeek, req.AllowSingle, req.AllowDouble,
+			req.AllowTriple, req.SpreadAcrossDays, req.MaxPerDay,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update lesson requirement: %w", err)
+		}
+	} else {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO lesson_requirements
+				(id, institution_id, class_id, academic_offering_id, term_id,
+				 sessions_per_week, allow_single, allow_double, allow_triple,
+				 spread_across_days, max_per_day, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+			RETURNING id`,
+			uuid.New(), institutionID, classID, req.AcademicOfferingID, req.TermID,
+			req.SessionsPerWeek, req.AllowSingle, req.AllowDouble, req.AllowTriple,
+			req.SpreadAcrossDays, req.MaxPerDay,
+		).Scan(&id)
+		if err != nil {
+			return nil, fmt.Errorf("create lesson requirement: %w", err)
+		}
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT `+lessonRequirementColumns+`
+		WHERE lr.id = $1`,
+		id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read lesson requirement: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, fmt.Errorf("read lesson requirement: %w", rows.Err())
+	}
+	lr, err := scanLessonRequirement(rows)
+	if err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit upsert lesson requirement: %w", err)
+	}
+	return lr, nil
+}
+
+func (r *Repository) DeleteLessonRequirement(ctx context.Context, institutionID, requirementID uuid.UUID) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE lesson_requirements SET deleted_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND institution_id = $2 AND deleted_at IS NULL`,
+		requirementID, institutionID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete lesson requirement: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLessonRequirementNotFound
+	}
+	return nil
 }

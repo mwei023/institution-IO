@@ -26,6 +26,18 @@ func NewService(repo *Repository, mpesaClient *mpesa.Client, publisher events.Pu
 	return &Service{repo: repo, mpesaClient: mpesaClient, publisher: publisher, callbackURL: callbackURL}
 }
 
+// VerifyParentChild enforces parent→child ownership (pilot P0-4).
+func (s *Service) VerifyParentChild(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) error {
+	linked, err := s.repo.IsChildOfParent(ctx, institutionID, parentUserID, studentID)
+	if err != nil {
+		return err
+	}
+	if !linked {
+		return fmt.Errorf("not linked to student")
+	}
+	return nil
+}
+
 // GetStudentFeeAccount retrieves the fee summary for a student.
 func (s *Service) GetStudentFeeAccount(ctx context.Context, institutionID, studentID uuid.UUID) (*StudentFeeAccount, error) {
 	acct, err := s.repo.GetStudentFeeAccount(ctx, institutionID, studentID)
@@ -78,6 +90,9 @@ func (s *Service) InitiateSTKPush(ctx context.Context, institutionID uuid.UUID, 
 	}
 
 	phone := formatPhone(req.Phone)
+	if len(phone) != 12 {
+		return nil, fmt.Errorf("invalid phone number — want 254XXXXXXXXX")
+	}
 	accountRef := acct.StudentName
 
 	stkResp, err := s.mpesaClient.InitiateSTKPush(ctx, creds, s.callbackURL, phone, accountRef, amountInt)
@@ -261,6 +276,28 @@ func (s *Service) ProcessDarajaCallback(ctx context.Context, payload []byte, cal
 
 // RecordManualPayment records a cash/cheque/bank transfer payment.
 func (s *Service) RecordManualPayment(ctx context.Context, institutionID, receiverID uuid.UUID, req *ManualPaymentRequest) (*FeePayment, error) {
+	if req.Amount <= 0 {
+		return nil, fmt.Errorf("amount must be greater than 0")
+	}
+	switch req.PaymentMethod {
+	case "cash", "bank_transfer", "cheque", "waiver":
+	default:
+		return nil, fmt.Errorf("invalid payment method")
+	}
+	// Verify student belongs to this institution.
+	if _, err := s.repo.GetStudentFeeAccount(ctx, institutionID, req.StudentID); err != nil {
+		return nil, fmt.Errorf("student not found: %w", err)
+	}
+	// Verify invoice (if given) belongs to this student + institution.
+	if req.InvoiceID != nil {
+		inv, err := s.repo.GetInvoiceByID(ctx, institutionID, *req.InvoiceID)
+		if err != nil {
+			return nil, fmt.Errorf("invoice not found: %w", err)
+		}
+		if inv.StudentID != req.StudentID {
+			return nil, fmt.Errorf("invoice does not belong to student")
+		}
+	}
 	receiptNumber, err := s.repo.GetNextReceiptNumber(ctx, institutionID)
 	if err != nil {
 		return nil, fmt.Errorf("generate receipt number: %w", err)
@@ -315,13 +352,22 @@ func (s *Service) GetPaymentHistory(ctx context.Context, institutionID, studentI
 }
 
 // formatPhone normalises a phone number to 254XXXXXXXXX format.
+// Pilot P0-3: strips spaces, dashes, parens; rejects non-digits.
 func formatPhone(phone string) string {
 	if len(phone) == 0 {
 		return phone
 	}
-	if phone[0] == '+' {
-		phone = phone[1:]
+	clean := make([]byte, 0, len(phone))
+	for i := 0; i < len(phone); i++ {
+		c := phone[i]
+		if c >= '0' && c <= '9' {
+			clean = append(clean, c)
+		} else if c == '+' && len(clean) == 0 {
+			continue // leading +
+		}
+		// drop spaces, dashes, parens
 	}
+	phone = string(clean)
 	if len(phone) == 10 && phone[0] == '0' {
 		phone = "254" + phone[1:]
 	}

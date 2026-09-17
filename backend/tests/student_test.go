@@ -81,6 +81,11 @@ func (m *MockStudentRepo) GetStudentParents(ctx context.Context, institutionID, 
 	return args.Get(0).([]*student.ParentGuardian), args.Error(1)
 }
 
+func (m *MockStudentRepo) GetChildrenForParent(ctx context.Context, institutionID, parentUserID uuid.UUID) ([]*student.ChildSummary, error) {
+	args := m.Called(ctx, institutionID, parentUserID)
+	return args.Get(0).([]*student.ChildSummary), args.Error(1)
+}
+
 // ─── Student Service Tests ────────────────────────────────────────
 
 func TestCreateAdmission_Success(t *testing.T) {

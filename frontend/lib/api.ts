@@ -245,8 +245,95 @@ createTeachingAssignment: (data: {
   // frontend/lib/api.ts — one more addition to academicsAPI
 getClassTimetable: (classId: string, termId?: string) =>
   api.get(`/academics/classes/${classId}/timetable`, { params: termId ? { term_id: termId } : {} }),
+  // Timetable engine: bell-schedule configuration (profiles + slots),
+  // lesson requirements, and the admin teacher-timetable view.
+  listScheduleProfiles: () => api.get("/academics/schedule-profiles"),
+  createScheduleProfile: (data: { name: string; term_id?: string; is_default?: boolean }) =>
+    api.post("/academics/schedule-profiles", data),
+  listScheduleSlots: (profileId: string) =>
+    api.get(`/academics/schedule-profiles/${profileId}/slots`),
+  createScheduleSlot: (profileId: string, data: {
+    day_of_week: number; sequence: number; start_time: string; end_time: string;
+    slot_type: string; is_instructional?: boolean; is_active?: boolean;
+  }) => api.post(`/academics/schedule-profiles/${profileId}/slots`, data),
+  updateScheduleSlot: (slotId: string, data: {
+    start_time?: string; end_time?: string; slot_type?: string;
+    is_instructional?: boolean; is_active?: boolean;
+  }) => api.patch(`/academics/schedule-slots/${slotId}`, data),
+  bulkCreateScheduleSlots: (profileId: string, data: {
+    days: number[]; sequence: number; start_time: string; end_time: string;
+    slot_type: string; is_instructional?: boolean; is_active?: boolean;
+  }) => api.post(`/academics/schedule-profiles/${profileId}/slots/bulk`, data),
+  copyScheduleDay: (profileId: string, data: {
+    from_day: number; to_days: number[]; overwrite?: boolean;
+  }) => api.post(`/academics/schedule-profiles/${profileId}/slots/copy`, data),
+  propagateScheduleSlot: (slotId: string, data: {
+    start_time?: string; end_time?: string; slot_type?: string;
+    is_instructional?: boolean; is_active?: boolean; target_days: number[];
+  }) => api.post(`/academics/schedule-slots/${slotId}/propagate`, data),
+  deleteScheduleSlot: (slotId: string) =>
+    api.delete(`/academics/schedule-slots/${slotId}`),
+  getTeacherTimetable: (teacherId: string, termId?: string) =>
+    api.get(`/academics/teachers/${teacherId}/timetable`, { params: termId ? { term_id: termId } : {} }),
+  listLessonRequirements: (classId: string, termId: string) =>
+    api.get(`/academics/classes/${classId}/lesson-requirements`, { params: { term_id: termId } }),
+  upsertLessonRequirement: (classId: string, data: {
+    term_id: string; academic_offering_id: string; sessions_per_week: number;
+    allow_single: boolean; allow_double: boolean; allow_triple: boolean;
+    spread_across_days: boolean; max_per_day?: number | null;
+  }) => api.put(`/academics/classes/${classId}/lesson-requirements`, data),
+  deleteLessonRequirement: (requirementId: string) =>
+    api.delete(`/academics/lesson-requirements/${requirementId}`),
 };
 
+
+export const examsAPI = {
+  listSessions: () => api.get("/exams/sessions"),
+  getSession: (id: string) => api.get(`/exams/sessions/${id}`),
+  createSession: (data: {
+    academic_year_id?: string; term_id?: string; name: string;
+    exam_type: string; start_date: string; end_date: string;
+  }) => api.post("/exams/sessions", data),
+  createPaper: (sessionId: string, data: {
+    academic_offering_id?: string; paper_name: string; paper_code?: string;
+    paper_number?: string; duration_minutes: number; max_marks?: number;
+    instructions?: string; is_shared?: boolean;
+  }) => api.post(`/exams/sessions/${sessionId}/papers`, data),
+  listPapers: (sessionId: string) => api.get(`/exams/sessions/${sessionId}/papers`),
+  addPaperGroup: (paperId: string, data: {
+    class_id?: string; label?: string; candidate_count?: number;
+  }) => api.post(`/exams/papers/${paperId}/groups`, data),
+  createSitting: (sessionId: string, data: {
+    exam_paper_id: string; exam_date: string; start_time: string; end_time: string;
+    room_name?: string; room_capacity?: number; candidate_count?: number; seating_note?: string;
+  }) => api.post(`/exams/sessions/${sessionId}/sittings`, data),
+  updateSitting: (sittingId: string, data: Record<string, unknown>) =>
+    api.patch(`/exams/sittings/${sittingId}`, data),
+  deleteSitting: (sittingId: string) => api.delete(`/exams/sittings/${sittingId}`),
+  assignInvigilator: (sittingId: string, data: { staff_id: string; role: string; notes?: string }) =>
+    api.post(`/exams/sittings/${sittingId}/invigilators`, data),
+  addArrangement: (sittingId: string, data: {
+    student_id?: string; class_id?: string; arrangement_type: string;
+    details?: string; extra_minutes?: number; room_name?: string;
+  }) => api.post(`/exams/sittings/${sittingId}/arrangements`, data),
+  validate: (sessionId: string) => api.post(`/exams/sessions/${sessionId}/validate`),
+  publish: (sessionId: string) => api.post(`/exams/sessions/${sessionId}/publish`),
+  reopen: (sessionId: string) => api.post(`/exams/sessions/${sessionId}/reopen`),
+  generate: (sessionId: string, data: {
+    start_date: string; end_date: string; daily_start_time: string;
+    daily_end_time: string; gap_minutes: number; max_sittings_per_day?: number;
+  }) => api.post(`/exams/sessions/${sessionId}/generate`, data),
+  master: (sessionId: string) => api.get(`/exams/sessions/${sessionId}/timetable`),
+  publishedMaster: (sessionId: string) => api.get(`/exams/sessions/${sessionId}/timetable/published`),
+  candidateView: (sessionId: string, classId: string) =>
+    api.get(`/exams/sessions/${sessionId}/timetable/candidate`, { params: { class_id: classId } }),
+  paperView: (sessionId: string, paperId: string) =>
+    api.get(`/exams/sessions/${sessionId}/timetable/paper`, { params: { paper_id: paperId } }),
+  roomView: (sessionId: string, room: string) =>
+    api.get(`/exams/sessions/${sessionId}/timetable/room`, { params: { room } }),
+  invigilatorView: (sessionId: string, staffId: string) =>
+    api.get(`/exams/sessions/${sessionId}/timetable/invigilator`, { params: { staff_id: staffId } }),
+};
 
 export const cbcAPI = {
   listLearningAreas: () => api.get("/cbc/learning-areas"),

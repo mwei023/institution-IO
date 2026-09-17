@@ -66,6 +66,91 @@ func (m *MockStore) CreateClass(ctx context.Context, institutionID uuid.UUID, re
 func (m *MockStore) AssignClassTeacher(ctx context.Context, institutionID, classID, teacherID uuid.UUID) error {
 	return m.Called(ctx, institutionID, classID, teacherID).Error(0)
 }
+func (m *MockStore) CreateTeachingAssignment(ctx context.Context, institutionID uuid.UUID, req *CreateTeachingAssignmentRequest) (*TeachingAssignment, error) {
+	args := m.Called(ctx, institutionID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*TeachingAssignment), args.Error(1)
+}
+func (m *MockStore) ListTeachingAssignmentsForClass(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*TeachingAssignmentOption, error) {
+	args := m.Called(ctx, institutionID, classID, termID)
+	return args.Get(0).([]*TeachingAssignmentOption), args.Error(1)
+}
+func (m *MockStore) CreateTimetablePeriod(ctx context.Context, institutionID uuid.UUID, req *CreateTimetablePeriodRequest) (*TimetablePeriod, error) {
+	args := m.Called(ctx, institutionID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*TimetablePeriod), args.Error(1)
+}
+func (m *MockStore) ListScheduleProfiles(ctx context.Context, institutionID uuid.UUID) ([]*ScheduleProfile, error) {
+	args := m.Called(ctx, institutionID)
+	return args.Get(0).([]*ScheduleProfile), args.Error(1)
+}
+func (m *MockStore) CreateScheduleProfile(ctx context.Context, institutionID uuid.UUID, req *CreateScheduleProfileRequest) (*ScheduleProfile, error) {
+	args := m.Called(ctx, institutionID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*ScheduleProfile), args.Error(1)
+}
+func (m *MockStore) ListScheduleSlots(ctx context.Context, institutionID, profileID uuid.UUID) ([]*ScheduleSlot, error) {
+	args := m.Called(ctx, institutionID, profileID)
+	return args.Get(0).([]*ScheduleSlot), args.Error(1)
+}
+func (m *MockStore) CreateScheduleSlot(ctx context.Context, institutionID, profileID uuid.UUID, req *CreateScheduleSlotRequest) (*ScheduleSlot, error) {
+	args := m.Called(ctx, institutionID, profileID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*ScheduleSlot), args.Error(1)
+}
+func (m *MockStore) UpdateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *UpdateScheduleSlotRequest) (*ScheduleSlot, error) {
+	args := m.Called(ctx, institutionID, slotID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*ScheduleSlot), args.Error(1)
+}
+func (m *MockStore) DeleteScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID) error {
+	return m.Called(ctx, institutionID, slotID).Error(0)
+}
+func (m *MockStore) CreateScheduleSlotsBulk(ctx context.Context, institutionID, profileID uuid.UUID, req *BulkCreateScheduleSlotsRequest) (*BulkCreateScheduleSlotsResult, error) {
+	args := m.Called(ctx, institutionID, profileID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*BulkCreateScheduleSlotsResult), args.Error(1)
+}
+func (m *MockStore) CopyScheduleDay(ctx context.Context, institutionID, profileID uuid.UUID, req *CopyScheduleDayRequest) (*BulkCreateScheduleSlotsResult, error) {
+	args := m.Called(ctx, institutionID, profileID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*BulkCreateScheduleSlotsResult), args.Error(1)
+}
+func (m *MockStore) PropagateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *PropagateScheduleSlotRequest) (*PropagateScheduleSlotResult, error) {
+	args := m.Called(ctx, institutionID, slotID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*PropagateScheduleSlotResult), args.Error(1)
+}
+func (m *MockStore) ListLessonRequirements(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*LessonRequirement, error) {
+	args := m.Called(ctx, institutionID, classID, termID)
+	return args.Get(0).([]*LessonRequirement), args.Error(1)
+}
+func (m *MockStore) UpsertLessonRequirement(ctx context.Context, institutionID, classID uuid.UUID, req *UpsertLessonRequirementRequest) (*LessonRequirement, error) {
+	args := m.Called(ctx, institutionID, classID, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*LessonRequirement), args.Error(1)
+}
+func (m *MockStore) DeleteLessonRequirement(ctx context.Context, institutionID, requirementID uuid.UUID) error {
+	return m.Called(ctx, institutionID, requirementID).Error(0)
+}
 func (m *MockStore) ListTeachers(ctx context.Context, institutionID uuid.UUID) ([]*TeacherOption, error) {
 	args := m.Called(ctx, institutionID)
 	return args.Get(0).([]*TeacherOption), args.Error(1)
@@ -93,9 +178,9 @@ func (m *MockStore) GetTimetableForTeacher(ctx context.Context, institutionID, t
 	args := m.Called(ctx, institutionID, teacherID, termID)
 	return args.Get(0).([]*TimetablePeriod), args.Error(1)
 }
-func (m *MockStore) GetTimetablePeriodByID(ctx context.Context, institutionID, periodID uuid.UUID) (*TimetablePeriod, error) {
+func (m *MockStore) GetTimetablePeriodByID(ctx context.Context, institutionID, periodID uuid.UUID) (*TimetablePeriodInfo, error) {
 	args := m.Called(ctx, institutionID, periodID)
-	return args.Get(0).(*TimetablePeriod), args.Error(1)
+	return args.Get(0).(*TimetablePeriodInfo), args.Error(1)
 }
 func (m *MockStore) GetOrCreateSession(ctx context.Context, institutionID, classID, teacherID uuid.UUID, sessionDate time.Time, sessionType string, periodID *uuid.UUID) (*AttendanceSession, error) {
 	args := m.Called(ctx, institutionID, classID, teacherID, sessionDate, sessionType, periodID)
@@ -166,6 +251,16 @@ func (m *MockStore) ListTerms(ctx context.Context, institutionID uuid.UUID) ([]*
 func (m *MockStore) GetInstitutionAttendanceToday(ctx context.Context, institutionID uuid.UUID, date time.Time) (*InstitutionAttendanceToday, error) {
 	args := m.Called(ctx, institutionID, date)
 	return args.Get(0).(*InstitutionAttendanceToday), args.Error(1)
+}
+
+func (m *MockStore) IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error) {
+	args := m.Called(ctx, institutionID, parentUserID, studentID)
+	return args.Bool(0), args.Error(1)
+}
+
+func (m *MockStore) GetStudentCurrentClass(ctx context.Context, institutionID, studentID uuid.UUID) (uuid.UUID, error) {
+	args := m.Called(ctx, institutionID, studentID)
+	return args.Get(0).(uuid.UUID), args.Error(1)
 }
 
 // ─── The actual tests ───────────────────────────────────────────────

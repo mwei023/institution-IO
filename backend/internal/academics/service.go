@@ -3,6 +3,7 @@ package academics
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 	"errors"
 
@@ -21,6 +22,28 @@ type Service struct {
 // NewService creates a new academics service.
 func NewService(repo Store, publisher events.Publisher) *Service {
 	return &Service{repo: repo, publisher: publisher}
+}
+
+// parentGuard is the narrow ownership-check contract. *Repository has it;
+// test mocks don't need it unless they exercise parent paths.
+type parentGuard interface {
+	IsChildOfParent(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) (bool, error)
+}
+
+// VerifyParentChild enforces parent→child ownership (pilot P0-4).
+func (s *Service) VerifyParentChild(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID) error {
+	g, ok := s.repo.(parentGuard)
+	if !ok {
+		return fmt.Errorf("parent guard unavailable")
+	}
+	linked, err := g.IsChildOfParent(ctx, institutionID, parentUserID, studentID)
+	if err != nil {
+		return err
+	}
+	if !linked {
+		return fmt.Errorf("not linked to student")
+	}
+	return nil
 }
 
 // ─── Classes ──────────────────────────────────────────────────────
@@ -235,6 +258,21 @@ func (s *Service) GetAttendanceSummary(ctx context.Context, institutionID, class
 	return s.repo.GetAttendanceSummary(ctx, institutionID, classID, startDate, endDate)
 }
 
+// GetChildAttendanceSummary is the parent-portal attendance path (P0-4):
+// ownership is verified, the child's class is resolved server-side, and
+// any caller-supplied class_id is ignored so a parent can't enumerate
+// other classes.
+func (s *Service) GetChildAttendanceSummary(ctx context.Context, institutionID, parentUserID, studentID uuid.UUID, startDate, endDate time.Time) ([]*AttendanceSummary, error) {
+	if err := s.VerifyParentChild(ctx, institutionID, parentUserID, studentID); err != nil {
+		return nil, err
+	}
+	classID, err := s.repo.GetStudentCurrentClass(ctx, institutionID, studentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.GetAttendanceSummary(ctx, institutionID, classID, startDate, endDate)
+}
+
 // ─── Grades ───────────────────────────────────────────────────────
 
 // GetGradeComponents returns assessment components for a class/subject/term.
@@ -425,4 +463,195 @@ func (s *Service) ListTeachingAssignmentsForClass(ctx context.Context, instituti
 
 func (s *Service) CreateTimetablePeriod(ctx context.Context, institutionID uuid.UUID, req *CreateTimetablePeriodRequest) (*TimetablePeriod, error) {
 	return s.repo.CreateTimetablePeriod(ctx, institutionID, req)
+}
+
+// ── Timetable engine ─────────────────────────────────────────────
+
+var (
+	ErrProfileNameRequired   = errors.New("profile name is required")
+	ErrInvalidDayOfWeek      = errors.New("day_of_week must be between 1 (Monday) and 7 (Sunday)")
+	ErrInvalidSequence       = errors.New("sequence must be at least 1")
+	ErrInvalidSlotTimes      = errors.New("start_time and end_time are required as HH:MM with end after start")
+	ErrInvalidSlotType       = errors.New("slot_type must be one of lesson, break, lunch, assembly, activity")
+	ErrInvalidSessionsPerWeek = errors.New("sessions_per_week must be at least 1")
+	ErrNoSessionShape        = errors.New("at least one of allow_single, allow_double, allow_triple is required")
+	ErrInvalidMaxPerDay      = errors.New("max_per_day must be positive when set")
+)
+
+func validSlotType(t string) bool {
+	switch t {
+	case "lesson", "break", "lunch", "assembly", "activity":
+		return true
+	}
+	return false
+}
+
+func parseSlotTime(v string) (time.Time, error) {
+	return time.Parse("15:04", v)
+}
+
+func (s *Service) ListScheduleProfiles(ctx context.Context, institutionID uuid.UUID) ([]*ScheduleProfile, error) {
+	return s.repo.ListScheduleProfiles(ctx, institutionID)
+}
+
+func (s *Service) CreateScheduleProfile(ctx context.Context, institutionID uuid.UUID, req *CreateScheduleProfileRequest) (*ScheduleProfile, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return nil, ErrProfileNameRequired
+	}
+	return s.repo.CreateScheduleProfile(ctx, institutionID, req)
+}
+
+func (s *Service) ListScheduleSlots(ctx context.Context, institutionID, profileID uuid.UUID) ([]*ScheduleSlot, error) {
+	return s.repo.ListScheduleSlots(ctx, institutionID, profileID)
+}
+
+func validateSlotShape(day, sequence int, start, end, slotType string) error {
+	if day < 1 || day > 7 {
+		return ErrInvalidDayOfWeek
+	}
+	if sequence < 1 {
+		return ErrInvalidSequence
+	}
+	if !validSlotType(slotType) {
+		return ErrInvalidSlotType
+	}
+	startT, err := parseSlotTime(start)
+	if err != nil {
+		return ErrInvalidSlotTimes
+	}
+	endT, err := parseSlotTime(end)
+	if err != nil {
+		return ErrInvalidSlotTimes
+	}
+	if !endT.After(startT) {
+		return ErrInvalidSlotTimes
+	}
+	return nil
+}
+
+func (s *Service) CreateScheduleSlot(ctx context.Context, institutionID, profileID uuid.UUID, req *CreateScheduleSlotRequest) (*ScheduleSlot, error) {
+	if err := validateSlotShape(req.DayOfWeek, req.Sequence, req.StartTime, req.EndTime, req.SlotType); err != nil {
+		return nil, err
+	}
+	return s.repo.CreateScheduleSlot(ctx, institutionID, profileID, req)
+}
+
+func (s *Service) UpdateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *UpdateScheduleSlotRequest) (*ScheduleSlot, error) {
+	if req.SlotType != nil && !validSlotType(*req.SlotType) {
+		return nil, ErrInvalidSlotType
+	}
+	if req.StartTime != nil {
+		if _, err := parseSlotTime(*req.StartTime); err != nil {
+			return nil, ErrInvalidSlotTimes
+		}
+	}
+	if req.EndTime != nil {
+		if _, err := parseSlotTime(*req.EndTime); err != nil {
+			return nil, ErrInvalidSlotTimes
+		}
+	}
+	return s.repo.UpdateScheduleSlot(ctx, institutionID, slotID, req)
+}
+
+func (s *Service) DeleteScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID) error {
+	return s.repo.DeleteScheduleSlot(ctx, institutionID, slotID)
+}
+
+// normalizeSlotDays dedupes a day list and rejects anything outside 1-7.
+func normalizeSlotDays(days []int) ([]int, error) {
+	if len(days) == 0 {
+		return nil, ErrInvalidDayOfWeek
+	}
+	seen := map[int]bool{}
+	var out []int
+	for _, d := range days {
+		if d < 1 || d > 7 {
+			return nil, ErrInvalidDayOfWeek
+		}
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) CreateScheduleSlotsBulk(ctx context.Context, institutionID, profileID uuid.UUID, req *BulkCreateScheduleSlotsRequest) (*BulkCreateScheduleSlotsResult, error) {
+	days, err := normalizeSlotDays(req.Days)
+	if err != nil {
+		return nil, err
+	}
+	req.Days = days
+	if req.Sequence < 1 {
+		return nil, ErrInvalidSequence
+	}
+	if err := validateSlotShape(days[0], req.Sequence, req.StartTime, req.EndTime, req.SlotType); err != nil {
+		return nil, err
+	}
+	return s.repo.CreateScheduleSlotsBulk(ctx, institutionID, profileID, req)
+}
+
+func (s *Service) CopyScheduleDay(ctx context.Context, institutionID, profileID uuid.UUID, req *CopyScheduleDayRequest) (*BulkCreateScheduleSlotsResult, error) {
+	if req.FromDay < 1 || req.FromDay > 7 {
+		return nil, ErrInvalidDayOfWeek
+	}
+	toDays, err := normalizeSlotDays(req.ToDays)
+	if err != nil {
+		return nil, err
+	}
+	// Drop the source day if the caller included it.
+	filtered := toDays[:0]
+	for _, d := range toDays {
+		if d != req.FromDay {
+			filtered = append(filtered, d)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, ErrInvalidDayOfWeek
+	}
+	req.ToDays = filtered
+	return s.repo.CopyScheduleDay(ctx, institutionID, profileID, req)
+}
+
+func (s *Service) PropagateScheduleSlot(ctx context.Context, institutionID, slotID uuid.UUID, req *PropagateScheduleSlotRequest) (*PropagateScheduleSlotResult, error) {
+	if req.SlotType != nil && !validSlotType(*req.SlotType) {
+		return nil, ErrInvalidSlotType
+	}
+	if req.StartTime != nil {
+		if _, err := parseSlotTime(*req.StartTime); err != nil {
+			return nil, ErrInvalidSlotTimes
+		}
+	}
+	if req.EndTime != nil {
+		if _, err := parseSlotTime(*req.EndTime); err != nil {
+			return nil, ErrInvalidSlotTimes
+		}
+	}
+	targetDays, err := normalizeSlotDays(req.TargetDays)
+	if err != nil {
+		return nil, err
+	}
+	req.TargetDays = targetDays
+	return s.repo.PropagateScheduleSlot(ctx, institutionID, slotID, req)
+}
+
+func (s *Service) ListLessonRequirements(ctx context.Context, institutionID, classID, termID uuid.UUID) ([]*LessonRequirement, error) {
+	return s.repo.ListLessonRequirements(ctx, institutionID, classID, termID)
+}
+
+func (s *Service) UpsertLessonRequirement(ctx context.Context, institutionID, classID uuid.UUID, req *UpsertLessonRequirementRequest) (*LessonRequirement, error) {
+	if req.SessionsPerWeek < 1 {
+		return nil, ErrInvalidSessionsPerWeek
+	}
+	if !req.AllowSingle && !req.AllowDouble && !req.AllowTriple {
+		return nil, ErrNoSessionShape
+	}
+	if req.MaxPerDay != nil && *req.MaxPerDay < 1 {
+		return nil, ErrInvalidMaxPerDay
+	}
+	return s.repo.UpsertLessonRequirement(ctx, institutionID, classID, req)
+}
+
+func (s *Service) DeleteLessonRequirement(ctx context.Context, institutionID, requirementID uuid.UUID) error {
+	return s.repo.DeleteLessonRequirement(ctx, institutionID, requirementID)
 }
