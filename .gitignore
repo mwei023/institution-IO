@@ -21,6 +21,7 @@
 *.crt
 *.cer
 secrets/
+.secrets/
 credentials/
 service-account*.json
 firebase-adminsdk*.json

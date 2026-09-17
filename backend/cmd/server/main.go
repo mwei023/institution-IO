@@ -27,6 +27,7 @@ import (
 	"institution-os/internal/notification"
 	"institution-os/internal/student"
 	"institution-os/pkg/config"
+	"institution-os/pkg/crypto"
 	"institution-os/pkg/db"
 
 	pkglogger "institution-os/pkg/logger"
@@ -73,6 +74,14 @@ func main() {
 	studentSvc := student.NewService(studentRepo, publisher)
 
 	financeRepo := finance.NewRepository(dbPool)
+	// Channel secrets (M-Pesa passkey, consumer key/secret) are encrypted at
+	// rest (migration 000017); without the key the server cannot open them,
+	// so a malformed ENCRYPTION_KEY is fatal, not a warning.
+	encryptionKey, err := crypto.ParseKey(cfg.EncryptionKey)
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid encryption key")
+	}
+	financeRepo.SetEncryptionKey(encryptionKey)
 	mpesaClient := finmpesa.NewClient(cfg)
 	financeSvc := finance.NewService(financeRepo, mpesaClient, publisher, cfg.MpesaCallbackURL)
 

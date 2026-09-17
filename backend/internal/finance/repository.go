@@ -26,11 +26,22 @@ var (
 // Repository handles database access for the finance domain.
 type Repository struct {
 	db *db.Pool
+	// encryptionKey is the raw AES-256 key decoded from ENCRYPTION_KEY.
+	// Required to read encrypted channel secrets; see decryptChannelSecret.
+	encryptionKey []byte
 }
 
 // NewRepository creates a new finance repository.
 func NewRepository(db *db.Pool) *Repository {
 	return &Repository{db: db}
+}
+
+// SetEncryptionKey wires the at-rest decryption key (raw 32 bytes, from
+// crypto.ParseKey(ENCRYPTION_KEY)). Without it, any channel row that
+// carries an encrypted secret fails to read — fails loudly rather than
+// serving credentials the process cannot open.
+func (r *Repository) SetEncryptionKey(key []byte) {
+	r.encryptionKey = key
 }
 
 // IsChildOfParent reports whether studentID is linked to parentUserID.

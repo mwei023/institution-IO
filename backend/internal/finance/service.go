@@ -8,9 +8,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"institution-os/internal/finance/mpesa"
-	"institution-os/pkg/events"
 	"github.com/rs/zerolog/log"
+	"institution-os/internal/finance/mpesa"
+	"institution-os/pkg/crypto"
+	"institution-os/pkg/events"
 )
 
 // Service implements all finance domain business logic.
@@ -455,6 +456,56 @@ type PaymentChannel struct {
 
 var ErrChannelNotFound = errors.New("payment channel not found")
 
+// decryptChannelSecret opens one stored channel credential. Legacy
+// plaintext values (pre-backfill rows) pass through unchanged with a
+// warning — after cmd/backfill-channels runs this branch disappears.
+// Encrypted values require the repository to hold the ENCRYPTION_KEY.
+func (r *Repository) decryptChannelSecret(field, stored string) (string, error) {
+	if stored == "" {
+		return "", nil
+	}
+	if !crypto.IsEncrypted(stored) {
+		log.Warn().Str("field", field).Msg("channel secret stored as PLAINTEXT — run cmd/backfill-channels before production")
+		return stored, nil
+	}
+	if len(r.encryptionKey) == 0 {
+		return "", fmt.Errorf("channel %s is encrypted but no ENCRYPTION_KEY is wired into the finance repository", field)
+	}
+	plain, err := crypto.Decrypt(r.encryptionKey, stored)
+	if err != nil {
+		return "", fmt.Errorf("decrypt channel %s: %w", field, err)
+	}
+	return string(plain), nil
+}
+
+// decryptChannelCredentials fills the encrypted fields of a channel
+// row in place, returning the first error encountered.
+func (r *Repository) decryptChannelCredentials(c *PaymentChannel) error {
+	var err error
+	if c.Passkey != nil {
+		var v string
+		if v, err = r.decryptChannelSecret("passkey", *c.Passkey); err != nil {
+			return err
+		}
+		c.Passkey = &v
+	}
+	if c.ConsumerKey != nil {
+		var v string
+		if v, err = r.decryptChannelSecret("consumer_key", *c.ConsumerKey); err != nil {
+			return err
+		}
+		c.ConsumerKey = &v
+	}
+	if c.ConsumerSecret != nil {
+		var v string
+		if v, err = r.decryptChannelSecret("consumer_secret", *c.ConsumerSecret); err != nil {
+			return err
+		}
+		c.ConsumerSecret = &v
+	}
+	return nil
+}
+
 // GetDefaultChannel returns the institution's default active M-Pesa channel.
 // This is what InitiateSTKPush uses when the caller doesn't specify a channel explicitly.
 func (r *Repository) GetDefaultChannel(ctx context.Context, institutionID uuid.UUID) (*PaymentChannel, error) {
@@ -479,6 +530,9 @@ func (r *Repository) GetDefaultChannel(ctx context.Context, institutionID uuid.U
 		}
 		return nil, fmt.Errorf("get default channel: %w", err)
 	}
+	if err := r.decryptChannelCredentials(&c); err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
 
@@ -502,6 +556,9 @@ func (r *Repository) GetChannelByShortcode(ctx context.Context, shortcode string
 			return nil, ErrChannelNotFound
 		}
 		return nil, fmt.Errorf("get channel by shortcode: %w", err)
+	}
+	if err := r.decryptChannelCredentials(&c); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }

@@ -16,6 +16,11 @@ psql_exec() { psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -t -A -c "$1"; }
 ensure_table() {
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
     "CREATE TABLE IF NOT EXISTS schema_migrations (version BIGINT PRIMARY KEY, dirty BOOLEAN NOT NULL DEFAULT false, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());" >/dev/null
+  # Databases initialized by other tools (e.g. golang-migrate) may carry a
+  # minimal table shape without applied_at; add it if missing instead of
+  # failing mid-run.
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+    "ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ NOT NULL DEFAULT now();" >/dev/null
 }
 
 # P0-2 guard: reject non-canonical filenames before touching the DB.
