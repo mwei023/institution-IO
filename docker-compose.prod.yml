@@ -1,0 +1,56 @@
+# Institution OS — production/staging compose file.
+# Lives at /opt/institution-os/docker-compose.prod.yml on the target host;
+# CD rewrites the `backend:` and `frontend:` image tags on every deploy
+# (sed "s|backend:.*|backend:<sha>|"), so keep those two image lines
+# exactly as `image: ghcr.io/<lowercase-owner>/<repo>/backend:<anything>`.
+#
+# Host prerequisites (one-time):
+#   docker network create ios-net
+#   .env.prod next to this file with the full backend config
+#     (DATABASE_URL, ENCRYPTION_KEY, JWT_*_KEY_PATH, MPESA_*, ...)
+#   `docker login ghcr.io` not needed for public images; CD injects a
+#   token for private ones.
+#
+# The postgres service is intentionally absent: point DATABASE_URL at the
+# managed/external database. Mounting TLS key material and JWT PEMs is up
+# to the host (see volumes below for the expected paths).
+#
+# Migrations run separately before rollout:
+#   docker run --rm --network ios-net --env-file .env.prod \
+#     ghcr.io/<owner>/<repo>/backend:<sha> ./server migrate up
+
+services:
+  backend:
+    image: ghcr.io/mwei023/institution-io/backend:latest
+    container_name: ios-backend
+    restart: unless-stopped
+    env_file: .env.prod
+    networks: [ios-net]
+    ports:
+      - "127.0.0.1:8080:8080"   # TLS termination happens in front (nginx/caddy)
+    volumes:
+      # JWT signing keys and any file-based secrets the app reads.
+      # Provision these on the host; keep them out of images.
+      - ./secrets/jwt_private.pem:/app/jwt_private.pem:ro
+      - ./secrets/jwt_public.pem:/app/jwt_public.pem:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  frontend:
+    image: ghcr.io/mwei023/institution-io/frontend:latest
+    container_name: ios-frontend
+    restart: unless-stopped
+    networks: [ios-net]
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  ios-net:
+    external: true

@@ -64,11 +64,14 @@ jobs:
             sed -i "s|backend:.*|backend:${{ github.sha }}|g" docker-compose.prod.yml
             sed -i "s|frontend:.*|frontend:${{ github.sha }}|g" docker-compose.prod.yml
 
-            # Run migrations before restarting
+            # Run migrations before restarting. The server binary handles
+            # `migrate up` itself (reads the bundled ./migrations dir and
+            # exits) — no psql or repo checkout needed on the host.
+            # Note: image ref must be the LOWERCASED repo name.
             docker run --rm \
               --network ios-net \
               --env-file .env.prod \
-              ghcr.io/${{ github.repository }}/backend:${{ github.sha }} \
+              ghcr.io/$REPO_LC/backend:${{ github.sha }} \
               ./server migrate up
 
             # Rolling restart

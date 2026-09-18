@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
 	"institution-os/internal/academics"
@@ -29,11 +30,21 @@ import (
 	"institution-os/pkg/config"
 	"institution-os/pkg/crypto"
 	"institution-os/pkg/db"
+	"institution-os/pkg/migrate"
 
 	pkglogger "institution-os/pkg/logger"
 )
 
 func main() {
+	// `./server migrate up` applies pending DB migrations and exits —
+	// how CD migrates staging before the new containers start. Reads
+	// migrations from ./migrations (bundled into the image by the
+	// Dockerfile); env comes from the container environment.
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrate(os.Args[2:])
+		return
+	}
+
 	cfg, err := config.Load(".env")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
@@ -434,4 +445,50 @@ func stubHandler(module string) http.HandlerFunc {
 			module,
 		)
 	}
+}
+
+// runMigrate implements `./server migrate up` for container-based deploys:
+// applies pending migrations from ./migrations and exits. Kept out of the
+// HTTP bootstrap so a migration run can never serve traffic.
+func runMigrate(args []string) {
+	if len(args) == 0 || args[0] != "up" {
+		fmt.Fprintln(os.Stderr, "usage: server migrate up")
+		os.Exit(2)
+	}
+	cfg, err := config.Load(".env")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: connect: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	runner, err := migrate.New(pool, "./migrations")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+		os.Exit(1)
+	}
+	before, err := runner.Version(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+		os.Exit(1)
+	}
+	applied, err := runner.Up(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+		os.Exit(1)
+	}
+	after, err := runner.Version(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("migrations: applied %d (version %d -> %d)\n", len(applied), before, after)
 }
