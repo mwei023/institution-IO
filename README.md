@@ -11,7 +11,7 @@
 # Institution OS
 
 A multi-tenant school management platform for Kenyan primary and secondary
-institutions, covering both the 8-4-4 and CBE (Competency-Based Education)
+institutions, covering  CBE (Competency-Based Education)
 curricula. Built as a modular monolith: Go backend, Next.js frontend,
 PostgreSQL.
 
